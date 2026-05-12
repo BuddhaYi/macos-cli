@@ -43,5 +43,6 @@ __pycache__/
 .idea/
 *.swp
 
-# CLAUDE.md (dev-only docs)
-CLAUDE.md
+# CLAUDE.md at REPO ROOT only — dev-only Claude Code notes, not for public push.
+# Leading "/" anchors to repo root, so vendor/<project>/CLAUDE.md (upstream source) still committed.
+/CLAUDE.md

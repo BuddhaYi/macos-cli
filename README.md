@@ -5,8 +5,8 @@
 ```bash
 macli x search "Claude Code"          # → vendor/magpie (twitter-cli + bird + opencli)
 macli x archive                       # → vendor/magpie (SQLite incremental sync)
-macli wx send 老婆 "下班来接"          # → vendor/wechat-mcp (locally patched)
-macli wx send 老婆 ~/Downloads/x.pdf   # ↑ same, auto-detects file
+macli wx send 文件传输助手 "晚安"                # → vendor/wechat-mcp (locally patched)
+macli wx send 文件传输助手 ~/Downloads/合同.pdf  # ↑ same, auto-detects file
 macli mac dark-mode toggle            # → osascript
 macli mac volume 50                   # → osascript
 macli mac kb safari_save_as_pdf x.pdf # → vendor/macos-automator-mcp KB (492 scripts)
@@ -19,14 +19,16 @@ One Python file (`macli`, ~1200 LOC, no pip deps) + 5 vendored backends = 39 MB 
 
 ---
 
-## Why this exists
+## Design
 
-| Pain | Solution |
+| Choice | Why |
 |---|---|
-| `bird`'s GitHub repo was **deleted**; only the npm package remains. | Vendored as files in `vendor/bird/`. Immune to npm yanks. |
-| `wechat-mcp` upstream is unmaintained and **broken** on current WeChat UI. | Vendored + **locally patched** (`wechat_accessibility.py`, `fetch_messages_by_chat_utils.py`). |
-| Different MCP servers / npm packages / pipx tools / git repos — `clone && go` was impossible. | Single repo, one `./install.sh` builds everything. |
-| Version drift breaking automation. | All deps pinned to specific commits (see `vendor/UPSTREAM_PINS.md`). |
+| **Single Python file** (~2250 LOC, stdlib only) | Agents can read the whole router in one shot; no virtualenv required to invoke; `curl-and-run` works. |
+| **All deps vendored** in `vendor/` | Offline reproducible. Patches stay intact. One `./install.sh` builds the entire backend graph. Frozen against upstream churn — see `vendor/UPSTREAM_PINS.md`. |
+| **JSON envelope on every internal command** | Agent-deterministic output: `{ok, schema_version, data, error}`. Pipe-friendly (`jq`), stable schema, errors machine-classifiable (see `SCHEMA.md`). |
+| **macOS-only, opinionated** | AppleScript / Accessibility / pyobjc baked in. No cross-platform abstraction tax, no fallbacks that pretend to work. |
+| **Self-describing CLI** | `macli help`, `macli mac kb-search`, `macli doctor --json` — agents discover capability at runtime, not from frozen docs that go stale. |
+| **wx send is verified, not fire-and-forget** | After Cmd+V+Enter, polls WeChat's AX tree for failure markers (`重发` / `被对方拒收` / etc). Permanent failures (block / 拒收) classified non-retriable. `--no-verify` opts out. |
 
 ---
 
@@ -174,7 +176,7 @@ macli doctor --json | jq .data.cookies.status              # "fresh"
 macli mac volume --json | jq .data.volume                  # 50
 macli mac kb-list --json | jq '.data.count'                # 492
 macli mac script 'return 42' --json | jq .data.stdout      # "42\n"
-macli wx send 老婆 "..." --json | jq .data.sent_at         # ISO timestamp
+macli wx send 文件传输助手 "..." --json | jq .data.sent_at   # ISO timestamp
 macli x archive --json | jq '.data.new_count, .data.total_count'
 macli x cookies-save --check-age --json | jq .data.status  # "fresh"
 ```

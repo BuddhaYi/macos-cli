@@ -100,7 +100,7 @@ No auth. Some scripts require app-specific permissions (e.g., AppleScript access
 ```bash
 macli doctor                          # Pretty tree
 macli mac volume                      # Just "50"
-macli wx send 老婆 "hi"                # "✓ sent text → 老婆"
+macli wx send 文件传输助手 "TODO: 周三对账"   # "✓ sent text → 文件传输助手"
 ```
 
 ### `--json`: Machine envelope (agent-friendly)
@@ -191,18 +191,22 @@ macli xiaohongshu feed
 ### WeChat (`macli wx ...`)
 
 ```bash
-# Text
-macli wx send 老婆 "下班来接我"
+# Text — quick notes / reminders / links to read later on phone
+macli wx send 文件传输助手 "TODO: 周三找李工对账"
+macli wx send 文件传输助手 "https://github.com/anthropics/claude-code"
 
-# File (auto-detected by Path.is_file)
-macli wx send 老婆 ~/Downloads/合同.pdf
-macli wx send 老婆 /tmp/screenshot.png
+# File (auto-detected by Path.is_file) — cross-device file transfer
+macli wx send 文件传输助手 ~/Downloads/合同.pdf
+macli wx send 文件传输助手 ~/Documents/会议记录.md
+macli wx send 文件传输助手 /tmp/screenshot.png
 
-# Read last N messages
-macli wx read 老婆 --limit 10            # JSON output by default for read
+# Read last N messages (recover what you saved earlier)
+macli wx read 文件传输助手 --limit 10    # JSON output by default for read
 ```
 
 **Important**: file paths must be absolute or in CWD. Tilde-expansion is handled.
+`文件传输助手` is WeChat's self-chat — ideal for stashing notes/files/links accessible
+from any logged-in device. For real conversations, replace with the recipient's name.
 
 ### macOS (`macli mac ...`)
 
@@ -244,9 +248,9 @@ macli x search "AI walnut measurement" --max 5 --json | \
 ### Send WeChat with confirmation read
 
 ```bash
-macli wx send 老婆 "Test 1234"
+macli wx send 文件传输助手 "ping $(date -u +%FT%TZ)"
 sleep 3
-macli wx read 老婆 --limit 1               # confirm last message
+macli wx read 文件传输助手 --limit 1       # confirm last message round-tripped
 ```
 
 ### Toggle dark mode, run a quick script

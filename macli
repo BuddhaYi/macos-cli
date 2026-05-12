@@ -2214,9 +2214,9 @@ INTERNAL
 EXAMPLES
   macli x search "Claude Code"
   macli x archive                                # bookmarks → ~/.tx/bookmarks.db
-  macli wx send 老婆 "下班来接"                  # default: verify + retry once
-  macli wx send 老婆 ~/Downloads/合同.pdf
-  macli wx contacts 老                            # filter contacts containing "老"
+  macli wx send 文件传输助手 "TODO: 周三对账"     # default: verify + retry once
+  macli wx send 文件传输助手 ~/Downloads/合同.pdf
+  macli wx contacts 助手                          # filter contacts containing "助手"
   macli mac dark-mode on
   macli mac kb-search "save webpage as PDF"
   macli mac kb safari_save_as_pdf ~/x.pdf

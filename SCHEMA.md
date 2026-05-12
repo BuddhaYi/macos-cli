@@ -79,10 +79,12 @@ Success:
 ok: true
 schema_version: "1"
 data:
-  contact: "老婆"
+  contact: "文件传输助手"
   kind: "text"                # text|file
-  payload_preview: "下班来接我"
+  payload_preview: "TODO: 周三对账"
   sent_at: "2026-05-12T16:00:00"
+  verified: true              # passed L2 AX-poll for failure markers
+  attempts: 1
 ```
 
 Error (contact not found):
@@ -91,7 +93,7 @@ ok: false
 schema_version: "1"
 error:
   code: not_found
-  message: "could not navigate to '老婆'"
+  message: "could not navigate to '不存在的联系人'"
 ```
 
 ### `macli wx read <contact> --limit N --json`
@@ -100,13 +102,13 @@ error:
 ok: true
 schema_version: "1"
 data:
-  contact: "老婆"
+  contact: "文件传输助手"
   count: 10
   messages:
     - sender: "ME"
-      text: "..."
-    - sender: "老婆"
-      text: "..."
+      text: "TODO: 周三对账"
+    - sender: "ME"
+      text: "https://github.com/anthropics/claude-code"
 ```
 
 ### `macli mac script '<code>' --json`

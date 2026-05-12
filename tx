@@ -1,0 +1,394 @@
+#!/usr/bin/env python3
+"""tx — macos-cli meta-router.
+
+A single CLI that fans out to vendored backends, all bundled in this repo:
+
+  tx x   <args>     → vendor/magpie/tx (X/Twitter + 132 sites via opencli + bird)
+  tx wx  <args>     → vendor/wechat-mcp (WeChat via macOS Accessibility)
+  tx mac <args>     → vendor/macos-automator-mcp (KB scripts) + raw osascript
+
+Internal commands:
+  tx doctor              diagnose all backends
+  tx --version
+  tx --help
+
+Backward compat: any first token that isn't a known namespace is forwarded to
+the magpie backend so existing `tx search "..."` style calls keep working.
+"""
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+VERSION = "0.1.0"
+
+# ---- Paths --------------------------------------------------------------
+ROOT = Path(__file__).resolve().parent
+VENDOR = ROOT / "vendor"
+MAGPIE_TX = VENDOR / "magpie" / "tx"
+WECHAT_MCP_SRC = VENDOR / "wechat-mcp" / "src"
+MACOS_AUTOMATOR_KB = VENDOR / "macos-automator-mcp" / "knowledge_base"
+
+# Built-in namespaces (Layer 1 router). Anything else falls through to magpie.
+NAMESPACES = {"x", "twitter", "wx", "wechat", "mac", "macos"}
+INTERNAL = {"doctor", "help"}
+
+
+# ---- Generic helpers ----------------------------------------------------
+
+def osascript(script, timeout=30):
+    return subprocess.run(
+        ["osascript", "-e", script],
+        capture_output=True, text=True, timeout=timeout,
+    )
+
+
+def execvp_or_fail(prog, args, hint=None):
+    if not shutil.which(prog):
+        print(f"tx: '{prog}' not found in PATH"
+              + (f"\n  → {hint}" if hint else ""), file=sys.stderr)
+        sys.exit(127)
+    os.execvp(prog, [prog] + args)
+
+
+# ---- Namespace: X / Twitter (magpie) ------------------------------------
+
+def route_magpie(args):
+    """Delegate to vendored magpie's tx (which itself routes bird/twitter-cli/opencli)."""
+    if not MAGPIE_TX.exists():
+        print(f"tx: vendor/magpie/tx missing — re-run ./install.sh", file=sys.stderr)
+        sys.exit(2)
+    os.execvp(str(MAGPIE_TX), [str(MAGPIE_TX)] + args)
+
+
+# ---- Namespace: WeChat --------------------------------------------------
+
+def _wechat_import():
+    """Add vendored wechat-mcp src/ to sys.path and import."""
+    sys.path.insert(0, str(WECHAT_MCP_SRC))
+    try:
+        from wechat_mcp.wechat_accessibility import (   # noqa
+            open_chat_for_contact,
+        )
+        return open_chat_for_contact
+    except ImportError as e:
+        print(f"tx: failed to import wechat-mcp: {e}\n"
+              "  → check vendor/wechat-mcp + run ./install.sh", file=sys.stderr)
+        sys.exit(1)
+
+
+def _set_clipboard_text(text):
+    subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=False)
+
+
+def _set_clipboard_file(path):
+    try:
+        from AppKit import NSPasteboard, NSURL  # pyobjc
+    except ImportError:
+        print("tx: pyobjc not available — install via vendor/wechat-mcp deps", file=sys.stderr)
+        sys.exit(1)
+    pb = NSPasteboard.generalPasteboard()
+    pb.clearContents()
+    pb.writeObjects_([NSURL.fileURLWithPath_(str(path))])
+
+
+def _paste_and_send_wechat():
+    osascript('''
+    tell application "WeChat" to activate
+    tell application "System Events" to tell process "WeChat"
+        keystroke "v" using command down
+        delay 0.9
+        key code 36
+    end tell
+    ''')
+
+
+def cmd_wx_send(args):
+    if len(args) < 2:
+        print("usage: tx wx send <contact> <text-or-file-path>", file=sys.stderr)
+        return 2
+    contact, payload = args[0], args[1]
+    open_chat = _wechat_import()
+
+    payload_path = Path(payload)
+    is_file = payload_path.is_file()
+
+    if is_file:
+        _set_clipboard_file(payload_path.resolve())
+    else:
+        _set_clipboard_text(payload)
+
+    result = open_chat(contact)
+    if not result:
+        print(f"tx wx: could not find chat '{contact}'", file=sys.stderr)
+        return 1
+    time.sleep(0.4)
+
+    _paste_and_send_wechat()
+    kind = "file" if is_file else "text"
+    print(f"✓ sent {kind} → {contact}")
+    return 0
+
+
+def cmd_wx_read(args):
+    if not args:
+        print("usage: tx wx read <contact> [--limit N]", file=sys.stderr)
+        return 2
+    contact = args[0]
+    limit = 10
+    if "--limit" in args:
+        i = args.index("--limit")
+        if i + 1 < len(args):
+            limit = int(args[i + 1])
+
+    sys.path.insert(0, str(WECHAT_MCP_SRC))
+    try:
+        from wechat_mcp.fetch_messages_by_chat_utils import fetch_messages_by_chat
+    except ImportError as e:
+        print(f"tx wx read: import failed: {e}", file=sys.stderr)
+        return 1
+
+    msgs = fetch_messages_by_chat(contact, last_n=limit)
+    print(json.dumps(msgs, indent=2, ensure_ascii=False))
+    return 0
+
+
+def route_wechat(args):
+    if not args:
+        print("usage: tx wx <send|read> [args...]", file=sys.stderr)
+        return 2
+    sub, rest = args[0], args[1:]
+    if sub == "send":
+        return cmd_wx_send(rest)
+    if sub == "read":
+        return cmd_wx_read(rest)
+    print(f"tx wx: unknown subcommand '{sub}'", file=sys.stderr)
+    return 2
+
+
+# ---- Namespace: macOS (osascript + KB) ----------------------------------
+
+_KB_CACHE = None
+
+
+def _kb_index():
+    """Build/return {kb_id: path-to-md} index from vendor/macos-automator-mcp/knowledge_base/."""
+    global _KB_CACHE
+    if _KB_CACHE is not None:
+        return _KB_CACHE
+    if not MACOS_AUTOMATOR_KB.is_dir():
+        _KB_CACHE = {}
+        return _KB_CACHE
+    idx = {}
+    for md in MACOS_AUTOMATOR_KB.rglob("*.md"):
+        try:
+            content = md.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        m = re.search(r"^id:\s*([\w-]+)\s*$", content, re.MULTILINE)
+        if m:
+            idx[m.group(1)] = md
+    _KB_CACHE = idx
+    return idx
+
+
+def _kb_extract_script(md_path):
+    text = md_path.read_text(encoding="utf-8")
+    blocks = re.findall(r"```(?:applescript|javascript)?\s*\n(.*?)\n```", text, re.DOTALL)
+    if not blocks:
+        return None, None
+    fm = re.search(r"^language:\s*(\w+)\s*$", text, re.MULTILINE)
+    lang = fm.group(1) if fm else "applescript"
+    return blocks[0], lang
+
+
+def cmd_mac_kb(args):
+    if not args:
+        print("usage: tx mac kb <script-id> [arg1 arg2 ...]", file=sys.stderr)
+        idx = _kb_index()
+        if idx:
+            print(f"\navailable ids ({len(idx)}): use `tx mac kb-list` to see all", file=sys.stderr)
+        return 2
+    script_id, script_args = args[0], args[1:]
+    idx = _kb_index()
+    if script_id not in idx:
+        print(f"tx mac kb: id '{script_id}' not found", file=sys.stderr)
+        return 1
+    script, lang = _kb_extract_script(idx[script_id])
+    if script is None:
+        print(f"tx mac kb: no code block in {idx[script_id]}", file=sys.stderr)
+        return 1
+
+    for i, val in enumerate(script_args, 1):
+        script = script.replace(f"--MCP_ARG_{i}", val)
+
+    cmd = ["osascript"] + (["-l", "JavaScript"] if lang.lower() in ("javascript", "jxa") else []) + ["-e", script]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    sys.stdout.write(r.stdout)
+    sys.stderr.write(r.stderr)
+    return r.returncode
+
+
+def cmd_mac_kb_list(args):
+    idx = _kb_index()
+    for kb_id in sorted(idx):
+        rel = idx[kb_id].relative_to(MACOS_AUTOMATOR_KB)
+        print(f"  {kb_id:48s}  {rel}")
+    print(f"\n({len(idx)} scripts)")
+    return 0
+
+
+def cmd_mac_script(args):
+    if not args:
+        print("usage: tx mac script '<applescript code>'", file=sys.stderr)
+        return 2
+    r = osascript(args[0], timeout=60)
+    sys.stdout.write(r.stdout)
+    sys.stderr.write(r.stderr)
+    return r.returncode
+
+
+def cmd_mac_dark_mode(args):
+    if not args or args[0] not in ("on", "off", "toggle"):
+        print("usage: tx mac dark-mode <on|off|toggle>", file=sys.stderr)
+        return 2
+    state = args[0]
+    if state == "toggle":
+        script = 'tell app "System Events" to tell appearance preferences to set dark mode to not dark mode'
+    else:
+        script = f'tell app "System Events" to tell appearance preferences to set dark mode to {state == "on"}'
+    r = osascript(script)
+    if r.returncode != 0:
+        print(r.stderr.strip(), file=sys.stderr)
+    else:
+        print(f"✓ dark mode {state}")
+    return r.returncode
+
+
+def cmd_mac_volume(args):
+    if not args:
+        r = osascript('output volume of (get volume settings)')
+        print(r.stdout.strip())
+        return 0
+    try:
+        vol = int(args[0])
+    except ValueError:
+        print("usage: tx mac volume <0-100>", file=sys.stderr)
+        return 2
+    osascript(f'set volume output volume {vol}')
+    print(f"✓ volume = {vol}")
+    return 0
+
+
+def route_mac(args):
+    if not args:
+        print("usage: tx mac <kb|kb-list|script|dark-mode|volume> ...", file=sys.stderr)
+        return 2
+    sub, rest = args[0], args[1:]
+    if sub == "kb":
+        return cmd_mac_kb(rest)
+    if sub == "kb-list":
+        return cmd_mac_kb_list(rest)
+    if sub == "script":
+        return cmd_mac_script(rest)
+    if sub == "dark-mode":
+        return cmd_mac_dark_mode(rest)
+    if sub == "volume":
+        return cmd_mac_volume(rest)
+    print(f"tx mac: unknown subcommand '{sub}'", file=sys.stderr)
+    return 2
+
+
+# ---- Internal commands ---------------------------------------------------
+
+def cmd_doctor(args):
+    print(f"macos-cli {VERSION}")
+    print(f"  ROOT:    {ROOT}")
+    print()
+    print("vendored backends:")
+    print(f"  magpie:               {MAGPIE_TX}  {'✓' if MAGPIE_TX.exists() else '✗ MISSING'}")
+    print(f"  wechat-mcp (src):     {WECHAT_MCP_SRC}  {'✓' if WECHAT_MCP_SRC.exists() else '✗ MISSING'}")
+    print(f"  macos-automator KB:   {MACOS_AUTOMATOR_KB}  {'✓' if MACOS_AUTOMATOR_KB.exists() else '✗ MISSING'}")
+    print()
+    print("external upstream tools (installed by install.sh):")
+    print(f"  bird:        {shutil.which('bird') or '✗ MISSING'}")
+    print(f"  twitter-cli: {shutil.which('twitter') or '✗ MISSING'}")
+    print(f"  opencli:     {shutil.which('opencli') or '✗ MISSING'}")
+    print()
+    idx = _kb_index()
+    print(f"KB scripts available: {len(idx)}")
+    return 0
+
+
+def cmd_help(args):
+    print(f"""tx {VERSION}  —  macos-cli unified router
+
+USAGE
+  tx <namespace> <action> [args...]
+  tx <legacy-magpie-cmd> [args...]            # backward compat
+
+NAMESPACES
+  tx x <args>          → vendor/magpie/tx (X/Twitter + 132 sites)
+  tx wx send <contact> <text|file-path>
+  tx wx read <contact> [--limit N]
+  tx mac script '<applescript>'
+  tx mac kb <script-id> [args...]
+  tx mac kb-list                              # list 600+ KB scripts
+  tx mac dark-mode <on|off|toggle>
+  tx mac volume [0-100]
+
+INTERNAL
+  tx doctor                                   # diagnose
+  tx --version
+  tx --help / -h
+
+EXAMPLES
+  tx x search "Claude Code"                   # routed to magpie/twitter-cli
+  tx x archive
+  tx wx send 老婆 "下班来接"
+  tx wx send 老婆 ~/Downloads/合同.pdf
+  tx mac dark-mode on
+  tx mac kb safari_save_as_pdf ~/x.pdf
+""")
+    return 0
+
+
+# ---- Main router ---------------------------------------------------------
+
+def route(argv):
+    if not argv or argv[0] in ("--help", "-h", "help"):
+        return cmd_help(argv[1:] if argv else [])
+    if argv[0] == "--version":
+        print(VERSION)
+        return 0
+
+    head, rest = argv[0], argv[1:]
+
+    if head == "doctor":
+        return cmd_doctor(rest)
+    if head in ("x", "twitter"):
+        route_magpie(rest)            # execvp, no return
+    if head in ("wx", "wechat"):
+        return route_wechat(rest)
+    if head in ("mac", "macos"):
+        return route_mac(rest)
+
+    # Fallthrough: pass to magpie (legacy / direct-magpie usage)
+    route_magpie([head] + rest)
+
+
+def main():
+    try:
+        return route(sys.argv[1:]) or 0
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

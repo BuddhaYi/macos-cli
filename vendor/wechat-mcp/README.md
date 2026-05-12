@@ -1,0 +1,169 @@
+<div align="center">
+
+# WeChat MCP Server
+
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![PyPI version](https://img.shields.io/pypi/v/wechat-mcp-server.svg)](https://pypi.org/project/wechat-mcp-server/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+[中文](docs/README_zh.md) | English
+
+</div>
+
+An MCP server that automates WeChat on macOS using the Accessibility API and screen capture. It enables LLMs to interact with WeChat chats programmatically.
+
+## Features
+
+- 📨 Fetch recent messages from any chat (contact or group)
+- ✍️ Send automated replies based on chat history
+- 📷 Publish text-only Moments posts, with optional draft-only mode
+- 👥 Add contacts using WeChat ID with configurable privacy
+- 🔍 Smart chat search with exact name matching
+- 🤖 5 specialized Claude Code sub-agents for smart WeChat automation
+
+## Quick Start
+
+### Installation
+
+```bash
+pip install wechat-mcp-server
+```
+
+### Setup with Claude Code
+
+```bash
+# If installed via pip
+claude mcp add --transport stdio wechat-mcp -- wechat-mcp
+
+# If using uv for development
+claude mcp add --transport stdio wechat-mcp -- uv --directory $(pwd) run wechat-mcp
+```
+
+<details>
+<summary>Setup with Claude Desktop</summary>
+
+```json
+// If installed via pip
+{
+  "mcpServers": {
+    "wechat-mcp": {
+      "type": "stdio",
+      "command": "wechat-mcp"
+    }
+  }
+}
+
+// If using uv for development
+{
+  "mcpServers": {
+    "wechat-mcp": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "--directory",
+        "{path/to/wechat-mcp}",
+        "run",
+        "wechat-mcp"
+      ],
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary>Setup with Codex</summary>
+
+```bash
+# If installed via pip
+codex mcp add wechat-mcp -- wechat-mcp
+
+# If using uv for development
+codex mcp add wechat-mcp -- uv --directory $(pwd) run wechat-mcp
+```
+
+</details>
+
+### macOS Permissions
+
+⚠️ **Important**: Grant Accessibility permissions to your terminal:
+
+1. Open **System Settings → Privacy & Security → Accessibility**
+2. Add your terminal application (Terminal.app, iTerm2, etc.)
+3. Ensure WeChat is running before using the server
+
+## Usage
+
+### Basic Commands
+
+```bash
+# Run with default stdio transport
+wechat-mcp --transport stdio
+
+# Run with HTTP transport
+wechat-mcp --transport streamable-http
+
+# Run with SSE transport
+wechat-mcp --transport sse
+```
+
+### Available MCP Tools
+
+- **`fetch_messages_by_chat`** - Get recent messages from a chat
+- **`reply_to_messages_by_chat`** - Send a reply to a chat
+- **`add_contact_by_wechat_id`** - Add a new contact using a WeChat ID and send a friend request
+- **`publish_moment_without_media`** - Publish a text-only Moments post (no photos or videos); optionally only prepare a draft without posting via `publish=False`
+
+See [detailed API documentation](docs/detailed-guide.md) for full tool specifications.
+
+## Claude Code Sub-Agents
+
+This project includes 5 intelligent sub-agents designed specifically for WeChat automation. They enable natural language control of WeChat through Claude Code.
+
+### Available Sub-Agents
+
+1. **Chat-summarizer** - Summarize chat history and extract key information
+2. **Auto-replier** - Auto-generate and send appropriate replies
+3. **Message-searcher** - Search chat history for specific content
+4. **Multi-chat-checker** - Monitor multiple chats and prioritize messages
+5. **Chat-insights** - Analyze relationship dynamics and communication patterns
+
+📖 [View complete sub-agents guide](.claude/agents/README.md)
+
+## Development
+
+### Local Setup with uv
+
+```bash
+# Install uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Clone and setup
+git clone https://github.com/yourusername/WeChat-MCP.git
+cd WeChat-MCP
+uv sync
+
+# Run locally
+uv run wechat-mcp --transport stdio
+```
+
+## Documentation
+
+- 📘 [Detailed Guide](docs/detailed-guide.md) - Complete API documentation and architecture
+- 🤖 [Sub-Agents Guide](.claude/agents/README.md) - How to use Claude Code sub-agents
+
+## Requirements
+
+- macOS (uses Accessibility API)
+- WeChat for Mac installed and running
+- Python 3.12+
+- Accessibility permissions for terminal
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## License
+
+MIT License - see [LICENSE](LICENSE) file for details

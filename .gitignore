@@ -1,0 +1,47 @@
+# Vendored subprojects' own .git directories — keep them local so you can
+# `cd vendor/<name> && git pull origin master` to sync upstream changes,
+# but don't push them as part of macos-cli's git history.
+vendor/*/.git
+vendor/*/.gitignore
+
+# Vendor build artifacts (regenerable via install.sh)
+vendor/*/node_modules/
+vendor/*/dist/
+vendor/*/build/
+vendor/*/.venv/
+vendor/*/__pycache__/
+vendor/*/**/__pycache__/
+vendor/*/*.egg-info/
+vendor/*/**/*.egg-info/
+
+# Vendor caches
+vendor/macos-automator-mcp/.eslintcache
+vendor/*/coverage/
+
+# Sensitive data (cookies, sessions, etc) — must never be committed
+*.env
+cookies*
+**/cookies.env
+
+# User runtime data
+*.db
+*.db-journal
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.Python
+*.egg-info/
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# CLAUDE.md (dev-only docs)
+CLAUDE.md

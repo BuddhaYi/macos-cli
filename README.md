@@ -155,7 +155,72 @@ MIT. Each vendored project retains its original LICENSE:
 
 ---
 
+## Agent-native usage
+
+macos-cli is designed for AI agents (Claude Code, Cursor, Codex, etc.) as much as for humans. Three metadata files at the repo root tell agents how to use it:
+
+| File | Purpose |
+|---|---|
+| **[SKILL.md](./SKILL.md)** | "Capability declaration" — frontmatter with `name`, `description`, `tags`, `trigger_phrases`. An agent reads this to decide *when* to invoke `macli`. |
+| **[AGENTS.md](./AGENTS.md)** | "Project guide" — file layout, code style, hard rules. An agent reads this when *modifying* the macos-cli codebase. |
+| **[SCHEMA.md](./SCHEMA.md)** | "Output contract" — the `{ok, schema_version, data, error}` envelope shape for `--json` output. An agent reads this when *parsing* outputs. |
+
+### `--json` is supported on every internal command
+
+Pipe-friendly envelope output:
+
+```bash
+macli doctor --json | jq .data.cookies.status              # "fresh"
+macli mac volume --json | jq .data.volume                  # 50
+macli mac kb-list --json | jq '.data.count'                # 492
+macli mac script 'return 42' --json | jq .data.stdout      # "42\n"
+macli wx send 老婆 "..." --json | jq .data.sent_at         # ISO timestamp
+macli x archive --json | jq '.data.new_count, .data.total_count'
+macli x cookies-save --check-age --json | jq .data.status  # "fresh"
+```
+
+For X-subsystem reads (`macli x search/feed/etc`), `--json` is passed through to the upstream tool (`twitter-cli`/`bird`/`opencli`) which has its own native JSON output — see `vendor/twitter-cli/SCHEMA.md`.
+
+### Error envelope is consistent
+
+```bash
+$ macli mac kb nonexistent --json | jq .
+{
+  "ok": false,
+  "schema_version": "1",
+  "error": {
+    "code": "not_found",
+    "message": "kb id 'nonexistent' not found"
+  }
+}
+```
+
+Standard error codes: `invalid_args`, `not_found`, `not_authenticated`, `vendor_missing`, `subprocess_failed`, `timeout`, `permission_denied`, `internal_error`. See [SCHEMA.md](./SCHEMA.md) for the full list.
+
+### Agent workflows (chain commands via jq)
+
+```bash
+# Daily X bookmark sync, only proceed if cookies are fresh
+macli x cookies-save --check-age --json | jq -e '.data.status == "fresh"' \
+  && macli x archive --json | jq -r '"archived: \(.data.new_count) new"'
+
+# Search X then download all matching media
+macli x search "AI walnut measurement" --max 5 --json | \
+  jq -r '.data[].id' | \
+  xargs -I{} macli x download --tweet-id {} --output ./dataset/
+
+# Doctor check, fail CI if any vendor missing
+macli doctor --json | jq -e '[.data.vendors[].present] | all'
+```
+
+---
+
 ## Changelog
+
+### v0.3 — agent-native metadata + JSON envelope
+- Added `AGENTS.md` / `SKILL.md` / `SCHEMA.md` at repo root for AI agent discoverability.
+- All 10 internal commands now support `--json` opt-in output via a shared `_envelope()` helper.
+- Renamed binary `tx` → `macli` to align with project name. Backward compat: `~/.tx/` data dir kept; `TX_DB` env var still honored.
 
 ### v0.2 — magpie absorbed
 - The X routing logic (formerly `vendor/magpie/tx`) is now **inlined** into top-level `macli`. magpie repository is no longer a vendored runtime layer.

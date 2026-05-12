@@ -28,7 +28,7 @@ import tempfile
 import time
 from pathlib import Path
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 # ---- Paths ---------------------------------------------------------------
 ROOT = Path(__file__).resolve().parent
@@ -94,6 +94,32 @@ def exec_or_fail(prog, args):
               file=sys.stderr)
         sys.exit(127)
     os.execvp(prog, [prog] + args)
+
+
+SCHEMA_VERSION = "1"
+
+
+def _envelope(ok, data=None, error_code=None, error_message=None):
+    """Build the standard agent-friendly output envelope (see SCHEMA.md)."""
+    out = {"ok": bool(ok), "schema_version": SCHEMA_VERSION}
+    if data is not None:
+        out["data"] = data
+    if not ok:
+        out["error"] = {
+            "code": error_code or "internal_error",
+            "message": error_message or "",
+        }
+    return out
+
+
+def _print_json(payload):
+    """Dump JSON envelope to stdout with consistent formatting."""
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
+def _has_flag(args, *flags):
+    """Return True if any of the given flag strings are in args."""
+    return any(f in args for f in flags)
 
 
 def suggest_similar(cmd, candidates):
@@ -312,13 +338,25 @@ def _extract_cookies_via_provider(provider_path, opts_json):
 
 
 def cmd_x_cookies_save(rest, cache):
+    as_json = _has_flag(rest, "--json")
     if "--check-age" in rest:
         age, source, label = _cookies_status()
         if age is None:
-            print("no cookies file — run `macli x cookies-save` to create one")
+            if as_json:
+                _print_json(_envelope(False, error_code="not_found",
+                                      error_message="no cookies file — run macli x cookies-save"))
+            else:
+                print("no cookies file — run `macli x cookies-save` to create one")
             return 1
         days = age / 86400
-        print(f"source: {source}\nage:    {days:.1f} days\nstatus: {label}")
+        if as_json:
+            _print_json(_envelope(True, data={
+                "source": source,
+                "age_days": round(days, 2),
+                "status": label,
+            }))
+        else:
+            print(f"source: {source}\nage:    {days:.1f} days\nstatus: {label}")
         return 0 if "stale" not in label and "expired" not in label else 2
 
     browser = "edge"
@@ -599,6 +637,7 @@ def cmd_x_download(rest, cache):
 def cmd_x_archive(rest, cache):
     import sqlite3
     from datetime import datetime
+    as_json = _has_flag(rest, "--json")
     db_path = Path(os.environ.get("TX_DB", "~/.tx/bookmarks.db")).expanduser()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     _load_cookies_env()
@@ -620,15 +659,30 @@ def cmd_x_archive(rest, cache):
 
     if not r or r.returncode != 0:
         err = (r.stderr if r else "no result").strip()
-        print(f"{backend_label} bookmarks failed: {err}", file=sys.stderr)
-        if r and _is_auth_error(err):
-            age, source, _ = _cookies_status()
-            if age is None:
-                print("\n  → cookies missing. run: macli x cookies-save", file=sys.stderr)
-            else:
-                print(f"\n  → cookies likely expired ({age/86400:.0f}d old, from {source}).", file=sys.stderr)
-                print("    1) Open Edge Beta → x.com → make sure logged in", file=sys.stderr)
-                print("    2) Run: macli x cookies-save", file=sys.stderr)
+        if as_json:
+            is_auth = r and _is_auth_error(err)
+            age, source, _ = _cookies_status() if is_auth else (None, None, None)
+            _print_json(_envelope(
+                False,
+                error_code="not_authenticated" if is_auth else "subprocess_failed",
+                error_message=(
+                    f"cookies likely expired ({age/86400:.0f}d old, from {source})"
+                    if (is_auth and age is not None)
+                    else f"{backend_label} bookmarks failed: {err[:200]}"
+                ),
+                data={"backend": backend_label, "hint": "run: macli x cookies-save"} if is_auth else None,
+            ))
+        else:
+            print(f"{backend_label} bookmarks failed: {err}", file=sys.stderr)
+            if r and _is_auth_error(err):
+                age, source, _ = _cookies_status()
+                if age is None:
+                    print("\n  → cookies missing. run: macli x cookies-save", file=sys.stderr)
+                else:
+                    print(f"\n  → cookies likely expired ({age/86400:.0f}d old, from {source}).", file=sys.stderr)
+                    print("    1) Open Edge Beta → x.com → make sure logged in", file=sys.stderr)
+                    print("    2) Run: macli x cookies-save", file=sys.stderr)
+        conn.close()
         return 1
 
     try:
@@ -639,7 +693,13 @@ def cmd_x_archive(rest, cache):
         else:
             tweets = parsed
     except json.JSONDecodeError as e:
-        print(f"{backend_label} returned invalid JSON: {e}", file=sys.stderr); return 1
+        if as_json:
+            _print_json(_envelope(False, error_code="internal_error",
+                                  error_message=f"{backend_label} returned invalid JSON: {e}"))
+        else:
+            print(f"{backend_label} returned invalid JSON: {e}", file=sys.stderr)
+        conn.close()
+        return 1
 
     cur.execute("SELECT tweet_id FROM bookmarks")
     seen = {row[0] for row in cur.fetchall()}
@@ -655,8 +715,20 @@ def cmd_x_archive(rest, cache):
              username, author.get("name"),
              t.get("createdAt"), json.dumps(t),
              datetime.utcnow().isoformat()))
-    conn.commit(); conn.close()
-    print(f"archived {len(new)} new bookmarks → {db_path}")
+    conn.commit()
+    cur.execute("SELECT COUNT(*) FROM bookmarks")
+    total = cur.fetchone()[0]
+    conn.close()
+
+    if as_json:
+        _print_json(_envelope(True, data={
+            "backend": backend_label,
+            "new_count": len(new),
+            "total_count": total,
+            "db_path": str(db_path),
+        }))
+    else:
+        print(f"archived {len(new)} new bookmarks → {db_path}")
     return 0
 
 
@@ -877,8 +949,14 @@ def _run_wechat_helper(script):
 
 
 def cmd_wx_send(args):
+    as_json = _has_flag(args, "--json")
+    args = [a for a in args if a != "--json"]
     if len(args) < 2:
-        print("usage: macli wx send <contact> <text-or-file-path>", file=sys.stderr)
+        msg = "usage: macli wx send <contact> <text-or-file-path>"
+        if as_json:
+            _print_json(_envelope(False, error_code="invalid_args", error_message=msg))
+        else:
+            print(msg, file=sys.stderr)
         return 2
     contact, payload = args[0], args[1]
     payload_path = Path(payload)
@@ -901,7 +979,12 @@ print("clip_ok")
 """
     r = _run_wechat_helper(stage)
     if "clip_ok" not in r.stdout:
-        print("macli wx: failed to stage clipboard", file=sys.stderr); return 1
+        msg = "failed to stage clipboard"
+        if as_json:
+            _print_json(_envelope(False, error_code="internal_error", error_message=msg))
+        else:
+            print(f"macli wx: {msg}", file=sys.stderr)
+        return 1
 
     nav = f"""
 import sys, json
@@ -912,7 +995,12 @@ print(json.dumps(res, default=str))
 """
     r = _run_wechat_helper(nav)
     if "nav_done" not in r.stdout:
-        print(f"macli wx: could not navigate to '{contact}'", file=sys.stderr); return 1
+        msg = f"could not navigate to '{contact}'"
+        if as_json:
+            _print_json(_envelope(False, error_code="not_found", error_message=msg))
+        else:
+            print(f"macli wx: {msg}", file=sys.stderr)
+        return 1
     time.sleep(0.4)
 
     osascript('''
@@ -923,13 +1011,31 @@ print(json.dumps(res, default=str))
         key code 36
     end tell
     ''')
-    print(f"✓ sent {'file' if is_file else 'text'} → {contact}")
+    kind = "file" if is_file else "text"
+    if as_json:
+        # Preview: file uses absolute path, text truncates to 200 chars
+        preview = str(payload_path.resolve()) if is_file else payload[:200]
+        _print_json(_envelope(True, data={
+            "contact": contact,
+            "kind": kind,
+            "payload_preview": preview,
+            "sent_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }))
+    else:
+        print(f"✓ sent {kind} → {contact}")
     return 0
 
 
 def cmd_wx_read(args):
+    as_json = _has_flag(args, "--json")
+    args = [a for a in args if a != "--json"]
     if not args:
-        print("usage: macli wx read <contact> [--limit N]", file=sys.stderr); return 2
+        msg = "usage: macli wx read <contact> [--limit N]"
+        if as_json:
+            _print_json(_envelope(False, error_code="invalid_args", error_message=msg))
+        else:
+            print(msg, file=sys.stderr)
+        return 2
     contact = args[0]; limit = 10
     if "--limit" in args:
         i = args.index("--limit")
@@ -940,10 +1046,36 @@ def cmd_wx_read(args):
 import json
 from wechat_mcp.fetch_messages_by_chat_utils import fetch_messages_by_chat
 msgs = fetch_messages_by_chat({repr(contact)}, last_n={limit})
-print(json.dumps(msgs, indent=2, ensure_ascii=False, default=str))
+print(json.dumps(msgs, ensure_ascii=False, default=str))
 """
     r = _run_wechat_helper(script)
-    sys.stdout.write(r.stdout)
+    raw = r.stdout.strip()
+    if r.returncode != 0 or not raw:
+        msg = (r.stderr or f"exit {r.returncode}").strip()[:200]
+        if as_json:
+            _print_json(_envelope(False, error_code="subprocess_failed", error_message=msg))
+        else:
+            sys.stdout.write(r.stdout)
+        return r.returncode or 1
+    try:
+        msgs = json.loads(raw)
+    except json.JSONDecodeError:
+        if as_json:
+            _print_json(_envelope(False, error_code="internal_error",
+                                  error_message=f"helper returned non-JSON: {raw[:200]}"))
+        else:
+            sys.stdout.write(r.stdout)
+        return 1
+    if as_json:
+        _print_json(_envelope(True, data={
+            "contact": contact,
+            "count": len(msgs) if isinstance(msgs, list) else (
+                len(msgs.get("result", [])) if isinstance(msgs, dict) else 0
+            ),
+            "messages": msgs,
+        }))
+    else:
+        print(json.dumps(msgs, indent=2, ensure_ascii=False, default=str))
     return r.returncode
 
 
@@ -987,43 +1119,105 @@ def _kb_extract_script(md_path):
 
 
 def cmd_mac_kb(args):
+    as_json = _has_flag(args, "--json")
+    args = [a for a in args if a != "--json"]
     if not args:
-        print("usage: macli mac kb <script-id> [arg1 ...]", file=sys.stderr); return 2
+        if as_json:
+            _print_json(_envelope(False, error_code="invalid_args",
+                                  error_message="usage: macli mac kb <script-id> [arg1 ...]"))
+        else:
+            print("usage: macli mac kb <script-id> [arg1 ...]", file=sys.stderr)
+        return 2
     script_id, script_args = args[0], args[1:]
     idx = _kb_index()
     if script_id not in idx:
-        print(f"macli mac kb: id '{script_id}' not found", file=sys.stderr); return 1
+        if as_json:
+            _print_json(_envelope(False, error_code="not_found",
+                                  error_message=f"kb id '{script_id}' not found"))
+        else:
+            print(f"macli mac kb: id '{script_id}' not found", file=sys.stderr)
+        return 1
     script, lang = _kb_extract_script(idx[script_id])
     if script is None:
-        print(f"macli mac kb: no code block in {idx[script_id]}", file=sys.stderr); return 1
+        if as_json:
+            _print_json(_envelope(False, error_code="internal_error",
+                                  error_message=f"no code block in {idx[script_id]}"))
+        else:
+            print(f"macli mac kb: no code block in {idx[script_id]}", file=sys.stderr)
+        return 1
     for i, val in enumerate(script_args, 1):
         script = script.replace(f"--MCP_ARG_{i}", val)
     cmd = ["osascript"] + (["-l", "JavaScript"] if lang.lower() in ("javascript", "jxa") else []) + ["-e", script]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if as_json:
+        ok = r.returncode == 0
+        _print_json(_envelope(
+            ok,
+            data={
+                "script_id": script_id,
+                "args": script_args,
+                "exit_code": r.returncode,
+                "stdout": r.stdout,
+                "stderr": r.stderr,
+            },
+            error_code=None if ok else "subprocess_failed",
+            error_message=None if ok else (r.stderr.strip() or f"exit {r.returncode}"),
+        ))
+        return r.returncode
     sys.stdout.write(r.stdout); sys.stderr.write(r.stderr)
     return r.returncode
 
 
 def cmd_mac_kb_list(args):
+    as_json = _has_flag(args, "--json")
     idx = _kb_index()
-    for kb_id in sorted(idx):
-        rel = idx[kb_id].relative_to(MACOS_AUTOMATOR_KB)
-        print(f"  {kb_id:48s}  {rel}")
-    print(f"\n({len(idx)} scripts)")
+    scripts = [
+        {"id": kb_id, "path": str(idx[kb_id].relative_to(MACOS_AUTOMATOR_KB))}
+        for kb_id in sorted(idx)
+    ]
+    if as_json:
+        _print_json(_envelope(True, data={"count": len(scripts), "scripts": scripts}))
+        return 0
+    for s in scripts:
+        print(f"  {s['id']:48s}  {s['path']}")
+    print(f"\n({len(scripts)} scripts)")
     return 0
 
 
 def cmd_mac_script(args):
+    as_json = _has_flag(args, "--json")
+    args = [a for a in args if a != "--json"]
     if not args:
-        print("usage: macli mac script '<applescript code>'", file=sys.stderr); return 2
+        if as_json:
+            _print_json(_envelope(False, error_code="invalid_args",
+                                  error_message="usage: macli mac script '<applescript code>'"))
+        else:
+            print("usage: macli mac script '<applescript code>'", file=sys.stderr)
+        return 2
     r = osascript(args[0], timeout=60)
+    if as_json:
+        ok = r.returncode == 0
+        _print_json(_envelope(
+            ok,
+            data={"exit_code": r.returncode, "stdout": r.stdout, "stderr": r.stderr},
+            error_code=None if ok else "subprocess_failed",
+            error_message=None if ok else (r.stderr.strip() or f"exit {r.returncode}"),
+        ))
+        return r.returncode
     sys.stdout.write(r.stdout); sys.stderr.write(r.stderr)
     return r.returncode
 
 
 def cmd_mac_dark_mode(args):
+    as_json = _has_flag(args, "--json")
+    args = [a for a in args if a != "--json"]
     if not args or args[0] not in ("on", "off", "toggle"):
-        print("usage: macli mac dark-mode <on|off|toggle>", file=sys.stderr); return 2
+        if as_json:
+            _print_json(_envelope(False, error_code="invalid_args",
+                                  error_message="usage: macli mac dark-mode <on|off|toggle>"))
+        else:
+            print("usage: macli mac dark-mode <on|off|toggle>", file=sys.stderr)
+        return 2
     state = args[0]
     if state == "toggle":
         script = 'tell app "System Events" to tell appearance preferences to set dark mode to not dark mode'
@@ -1031,21 +1225,50 @@ def cmd_mac_dark_mode(args):
         script = f'tell app "System Events" to tell appearance preferences to set dark mode to {state == "on"}'
     r = osascript(script)
     if r.returncode != 0:
-        print(r.stderr.strip(), file=sys.stderr)
+        if as_json:
+            _print_json(_envelope(False, error_code="subprocess_failed",
+                                  error_message=r.stderr.strip()))
+        else:
+            print(r.stderr.strip(), file=sys.stderr)
+        return r.returncode
+    # Read current state for confirmation
+    cur = osascript('tell app "System Events" to return dark mode of appearance preferences')
+    current = (cur.stdout or "").strip()
+    if as_json:
+        _print_json(_envelope(True, data={"requested": state, "current": current}))
     else:
         print(f"✓ dark mode {state}")
-    return r.returncode
+    return 0
 
 
 def cmd_mac_volume(args):
+    as_json = _has_flag(args, "--json")
+    args = [a for a in args if a != "--json"]
     if not args:
         r = osascript('output volume of (get volume settings)')
-        print(r.stdout.strip()); return 0
-    try: vol = int(args[0])
+        try:
+            vol = int(r.stdout.strip())
+        except (ValueError, AttributeError):
+            vol = None
+        if as_json:
+            _print_json(_envelope(True, data={"volume": vol, "changed": False}))
+        else:
+            print(vol if vol is not None else r.stdout.strip())
+        return 0
+    try:
+        vol = int(args[0])
     except ValueError:
-        print("usage: macli mac volume <0-100>", file=sys.stderr); return 2
+        if as_json:
+            _print_json(_envelope(False, error_code="invalid_args",
+                                  error_message="usage: macli mac volume <0-100>"))
+        else:
+            print("usage: macli mac volume <0-100>", file=sys.stderr)
+        return 2
     osascript(f'set volume output volume {vol}')
-    print(f"✓ volume = {vol}")
+    if as_json:
+        _print_json(_envelope(True, data={"volume": vol, "changed": True}))
+    else:
+        print(f"✓ volume = {vol}")
     return 0
 
 
@@ -1066,27 +1289,59 @@ def route_mac(args):
 # =============================================================================
 
 def cmd_doctor(args):
+    idx = _kb_index()
+    vendors_info = {
+        "bird":                {"path": str(VENDOR / "bird"),                "present": (VENDOR / "bird").exists()},
+        "twitter-cli":         {"path": str(VENDOR / "twitter-cli"),         "present": (VENDOR / "twitter-cli").exists()},
+        "opencli":             {"path": str(VENDOR / "opencli"),             "present": (VENDOR / "opencli").exists()},
+        "macos-automator-mcp": {"path": str(MACOS_AUTOMATOR_KB),             "present": MACOS_AUTOMATOR_KB.exists(), "kb_count": len(idx)},
+        "wechat-mcp":          {"path": str(WECHAT_MCP_SRC),                 "present": WECHAT_MCP_SRC.exists()},
+    }
+    external_info = {
+        "bird":    shutil.which("bird"),
+        "twitter": shutil.which("twitter"),
+        "opencli": shutil.which("opencli"),
+    }
+    cache_age_hours = None
+    if CACHE_FILE.exists():
+        cache_age_hours = round((time.time() - CACHE_FILE.stat().st_mtime) / 3600, 2)
+    cookie_age, cookie_source, cookie_label = _cookies_status()
+    cookies_info = {
+        "path": str(COOKIES_FILE),
+        "source": cookie_source,
+        "age_days": round(cookie_age / 86400, 2) if cookie_age is not None else None,
+        "status": cookie_label,
+    }
+
+    if _has_flag(args, "--json"):
+        _print_json(_envelope(True, data={
+            "version": VERSION,
+            "root": str(ROOT),
+            "vendors": vendors_info,
+            "external_tools": external_info,
+            "x_cache": {"path": str(CACHE_FILE), "age_hours": cache_age_hours},
+            "cookies": cookies_info,
+            "kb_count": len(idx),
+        }))
+        return 0
+
+    # Human-readable format
     print(f"macos-cli {VERSION}")
     print(f"  ROOT:    {ROOT}\n")
     print("vendored backends:")
-    print(f"  wechat-mcp (src):     {WECHAT_MCP_SRC}  {'✓' if WECHAT_MCP_SRC.exists() else '✗ MISSING'}")
-    print(f"  macos-automator KB:   {MACOS_AUTOMATOR_KB}  {'✓' if MACOS_AUTOMATOR_KB.exists() else '✗ MISSING'}")
-    print(f"  bird (npm-packaged):  {VENDOR / 'bird'}  {'✓' if (VENDOR / 'bird').exists() else '✗ MISSING'}")
-    print(f"  twitter-cli (src):    {VENDOR / 'twitter-cli'}  {'✓' if (VENDOR / 'twitter-cli').exists() else '✗ MISSING'}")
-    print(f"  opencli (src):        {VENDOR / 'opencli'}  {'✓' if (VENDOR / 'opencli').exists() else '✗ MISSING'}")
+    for name, info in vendors_info.items():
+        mark = "✓" if info["present"] else "✗ MISSING"
+        extra = f"  ({info['kb_count']} KB scripts)" if "kb_count" in info else ""
+        print(f"  {name:22s} {info['path']}  {mark}{extra}")
     print()
     print("external upstream tools (installed by install.sh):")
-    print(f"  bird:        {shutil.which('bird') or '✗ MISSING'}")
-    print(f"  twitter-cli: {shutil.which('twitter') or '✗ MISSING'}")
-    print(f"  opencli:     {shutil.which('opencli') or '✗ MISSING'}")
+    for name, path in external_info.items():
+        print(f"  {name:12s} {path or '✗ MISSING'}")
     print()
-    if CACHE_FILE.exists():
-        age = time.time() - CACHE_FILE.stat().st_mtime
-        print(f"X cache: {CACHE_FILE} (age {age/3600:.1f}h)")
-    age, source, label = _cookies_status()
-    if age is not None:
-        print(f"X cookies: {source} ({age/86400:.1f}d, {label})")
-    idx = _kb_index()
+    if cache_age_hours is not None:
+        print(f"X cache: {CACHE_FILE} (age {cache_age_hours:.1f}h)")
+    if cookie_age is not None:
+        print(f"X cookies: {cookie_source} ({cookies_info['age_days']}d, {cookie_label})")
     print(f"\nKB scripts: {len(idx)}")
     return 0
 

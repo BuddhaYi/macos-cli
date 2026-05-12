@@ -46,10 +46,7 @@ $PYE "$VENDOR/twitter-cli"
 echo "==> 5. wechat-mcp (editable install — preserves your local patches)"
 $PYE "$VENDOR/wechat-mcp"
 
-echo "==> 6. magpie (single-file script — link directly)"
-chmod +x "$VENDOR/magpie/tx"
-
-echo "==> 7. macos-cli main entry"
+echo "==> 6. macos-cli main entry (X subsystem absorbed from magpie)"
 chmod +x "$SCRIPT_DIR/tx"
 ln -sf "$SCRIPT_DIR/tx" "$target/tx"
 

@@ -13,7 +13,9 @@ tx mac kb safari_save_as_pdf x.pdf # → vendor/macos-automator-mcp KB (492 scri
 tx arxiv search "vision"           # → vendor/opencli arxiv adapter
 ```
 
-One Python file (`tx`, ~300 LOC) + 5 vendored backends = 38 MB self-contained repo.
+One Python file (`tx`, ~1200 LOC, no pip deps) + 5 vendored backends = 39 MB self-contained repo.
+
+> **v0.2 note**: this project absorbed [magpie](https://github.com/BuddhaYi/magpie)'s X-routing logic directly into `tx`. magpie as a runtime layer no longer exists — `tx x ...` calls the absorbed code, then execs `twitter-cli` / `bird` / `opencli` directly. See changelog below.
 
 ---
 
@@ -48,7 +50,8 @@ tx <namespace> <action> [args...]
 | `vendor/opencli/` | 132 web sites + 8 app adapters + browser bridge | `jackwener/opencli` | ~17 MB TS |
 | `vendor/macos-automator-mcp/` | 492 reusable AppleScript/JXA snippets (KB only used) | `steipete/macos-automator-mcp` | ~3 MB |
 | `vendor/wechat-mcp/` | WeChat send/read via macOS Accessibility | `BiboyQG/WeChat-MCP` + **local patches** | ~2 k Python |
-| `vendor/magpie/` | X router (single-file tx) | `BuddhaYi/magpie` | ~1 k Python |
+
+The X routing logic itself (originally a separate `vendor/magpie/tx` file) was absorbed into top-level `tx` in v0.2 — `magpie` no longer exists as a runtime layer. See `LICENSES/magpie-MIT.txt` for the original attribution.
 
 See `vendor/UPSTREAM_PINS.md` for exact commit each was vendored from.
 
@@ -152,10 +155,26 @@ MIT. Each vendored project retains its original LICENSE:
 
 ---
 
+## Changelog
+
+### v0.2 — magpie absorbed
+- The X routing logic (formerly `vendor/magpie/tx`) is now **inlined** into top-level `tx`. magpie repository is no longer a vendored runtime layer.
+- `tx x ...` calls the absorbed code directly; one less Python process per X command (~50ms saved).
+- `LICENSES/magpie-MIT.txt` preserves the original copyright attribution.
+- Backward compat: legacy `tx search "..."` style commands still work (auto-routed to X subsystem).
+
+### v0.1 — initial release
+- Three namespaces: `tx x` (X/Twitter), `tx wx` (WeChat), `tx mac` (macOS).
+- All upstream deps vendored for offline reproducibility.
+- bird preserved from npm package (upstream GitHub deleted).
+- wechat-mcp includes local patches for current WeChat UI.
+
+---
+
 ## Credits
 
 Built on top of (all vendored, see `vendor/UPSTREAM_PINS.md`):
-- [magpie](https://github.com/BuddhaYi/magpie) — X router
+- [magpie](https://github.com/BuddhaYi/magpie) — X routing logic (absorbed v0.2)
 - [twitter-cli](https://github.com/public-clis/twitter-cli) by jackwener
 - [bird](https://www.npmjs.com/package/@steipete/bird) by Peter Steinberger (GitHub deleted)
 - [opencli](https://github.com/jackwener/opencli) by jackwener

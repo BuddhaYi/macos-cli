@@ -40,7 +40,7 @@ error:
 ok: true
 schema_version: "1"
 data:
-  version: "0.2.0"
+  version: "0.4.0"
   root: "/path/to/macos-cli"
   vendors:
     bird:                {path: "...", present: true}
@@ -67,7 +67,7 @@ data:
 ok: true
 schema_version: "1"
 data:
-  version: "0.2.0"
+  version: "0.4.0"
   namespaces: ["x", "wx", "mac"]
   internal_commands: ["doctor", "help"]
 ```

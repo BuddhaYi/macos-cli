@@ -217,6 +217,30 @@ macli doctor --json | jq -e '[.data.vendors[].present] | all'
 
 ## Changelog
 
+### v0.4 — reliability + agent-friendly extras
+- **fix**: `macli wx send` no longer silently reports `ok:true` when WeChat shows a failure indicator. Verify is now smarter:
+  - polls the last 3 AX rows for failure markers (`重发`, `发送失败`, `被对方拒收`, `已被对方拉黑`, plus English equivalents)
+  - checks `AXValue` in addition to `AXIdentifier/Title/Description` (system rejection messages put text in `AXValue`)
+  - uses full timeout as observation window (text: 6s, file: 30s) — single-poll WeChat AX traversal can take 3-5s, so a multi-counter "consecutive clean" approach starves
+  - identifies permanent failures (`被对方拒收` / 拉黑) as non-retriable — stops retrying immediately
+  - `--no-verify` opt-out, `--retry N` for transient failures, `--verify-timeout N` override
+- **add**: every `macli wx send` invocation appends a NDJSON line to `~/.tx/wx_send.log` (success or failure). `jq -c 'select(.ok==false)' ~/.tx/wx_send.log` for quick failure audit.
+- **add**: on non-TTY failure (cron / agent / piped stdout), `macli wx send` fires a typed desktop notification (e.g. "macli wx: 已被拒收" vs "macli wx: 状态不明") so background failures don't go silent. TTY callers see stderr only — no banner noise.
+- **fix**: `_wechat_python` previously picked the first venv where `bin/python` existed without validating that `wechat_mcp` was importable — a half-built venv (e.g. from a prior `pip install` that silently failed on the wrong Python version) would shadow a working fallback. Now each candidate runs `python -c "import wechat_mcp"` before being selected.
+- **fix**: `doctor --fix` for wechat-mcp now auto-detects a Python ≥3.12 interpreter (`python3.13` → `python3.12` → `python3`) since wechat-mcp's pyproject pins that minimum. Broken half-built venvs are deleted and rebuilt cleanly.
+- **fix**: `macli wx read` previously imported a function name (`fetch_messages_by_chat`) that does not exist in the vendored source — every invocation would `ImportError`. Now uses the actual exported `fetch_recent_messages` with explicit `open_chat_for_contact` first.
+- **add**: `macli wx contacts [filter]` — list known WeChat contacts via `collect_chat_elements`.
+- **add**: `macli mac kb-search <query>` — fuzzy keyword search across 492 KB scripts with a lazy-built `~/.tx/kb-search-index.json` (auto-rebuilds when KB files change).
+- **add**: `macli doctor --fix` — auto-repair missing vendor pieces (`npm link` / `pipx install -e` / venv setup) without re-running `install.sh`.
+- **add**: `macli stats` — local-only usage report (bookmarks, cookies freshness, KB index, archive log). No telemetry.
+- **add**: zsh completion at `completions/_macli` (subcommands + dynamic KB IDs + contact suggestions). Wired automatically by `install.sh`.
+- **add**: `tests/test_smoke.sh` — 18 read-only sanity tests covering envelope contracts.
+- **change**: auth-error paths in `macli x archive` now fire a macOS desktop notification so cron-driven failures don't go silent.
+
+#### Known verify limitations
+- File-too-large errors that WeChat surfaces via a **modal dialog** (not an in-list bubble) are not detectable — they never reach the AX message list. Affects only > ~1GB file sends.
+- Network-disconnected sends cannot be tested via an automated agent (the agent itself goes offline). Manual: `sudo ifconfig en0 down` mid-send.
+
 ### v0.3 — agent-native metadata + JSON envelope
 - Added `AGENTS.md` / `SKILL.md` / `SCHEMA.md` at repo root for AI agent discoverability.
 - All 10 internal commands now support `--json` opt-in output via a shared `_envelope()` helper.

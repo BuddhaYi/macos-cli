@@ -28,7 +28,7 @@ import tempfile
 import time
 from pathlib import Path
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 # ---- Paths ---------------------------------------------------------------
 ROOT = Path(__file__).resolve().parent
@@ -122,10 +122,46 @@ def _has_flag(args, *flags):
     return any(f in args for f in flags)
 
 
+def _pop_flag(args, flag):
+    """Pop a boolean flag from args. Returns (present, filtered_args).
+
+    Centralizes the `as_json = _has_flag(args, "--json"); args = [...]`
+    boilerplate that appears in every command. Caller writes:
+        as_json, args = _pop_flag(args, "--json")
+    """
+    if flag not in args:
+        return False, args
+    return True, [a for a in args if a != flag]
+
+
+def _emit_ok(data=None):
+    """Print a success envelope to stdout (machine output)."""
+    _print_json(_envelope(True, data=data))
+
+
+def _emit_err(code, message, data=None):
+    """Print a failure envelope to stdout. Caller still picks exit code."""
+    _print_json(_envelope(False, data=data, error_code=code, error_message=message))
+
+
 def suggest_similar(cmd, candidates):
     matches = difflib.get_close_matches(cmd, candidates, n=3, cutoff=0.6)
     if matches:
         print(f"  did you mean: {', '.join(matches)}?", file=sys.stderr)
+
+
+def _notify_user(title, message, sound="Submarine"):
+    """Fire a macOS desktop notification. Best-effort; ignores any failure."""
+    try:
+        safe_title = (title or "").replace('"', "'")
+        safe_msg = (message or "").replace('"', "'")
+        subprocess.run(
+            ["osascript", "-e",
+             f'display notification "{safe_msg}" with title "{safe_title}" sound name "{sound}"'],
+            capture_output=True, timeout=5,
+        )
+    except Exception:
+        pass
 
 
 # =============================================================================
@@ -343,18 +379,17 @@ def cmd_x_cookies_save(rest, cache):
         age, source, label = _cookies_status()
         if age is None:
             if as_json:
-                _print_json(_envelope(False, error_code="not_found",
-                                      error_message="no cookies file — run macli x cookies-save"))
+                _emit_err("not_found", "no cookies file — run macli x cookies-save")
             else:
                 print("no cookies file — run `macli x cookies-save` to create one")
             return 1
         days = age / 86400
         if as_json:
-            _print_json(_envelope(True, data={
+            _emit_ok({
                 "source": source,
                 "age_days": round(days, 2),
                 "status": label,
-            }))
+            })
         else:
             print(f"source: {source}\nage:    {days:.1f} days\nstatus: {label}")
         return 0 if "stale" not in label and "expired" not in label else 2
@@ -659,22 +694,27 @@ def cmd_x_archive(rest, cache):
 
     if not r or r.returncode != 0:
         err = (r.stderr if r else "no result").strip()
+        is_auth = bool(r) and _is_auth_error(err)
+        if is_auth:
+            age, source, _ = _cookies_status()
+            age_part = f"{age/86400:.0f}d old, from {source}" if age is not None else "missing"
+            _notify_user(
+                "macli: X cookies expired",
+                f"Renew with: macli x cookies-save  ({age_part})",
+            )
         if as_json:
-            is_auth = r and _is_auth_error(err)
             age, source, _ = _cookies_status() if is_auth else (None, None, None)
-            _print_json(_envelope(
-                False,
-                error_code="not_authenticated" if is_auth else "subprocess_failed",
-                error_message=(
-                    f"cookies likely expired ({age/86400:.0f}d old, from {source})"
-                    if (is_auth and age is not None)
-                    else f"{backend_label} bookmarks failed: {err[:200]}"
-                ),
-                data={"backend": backend_label, "hint": "run: macli x cookies-save"} if is_auth else None,
-            ))
+            _emit_err(
+                "not_authenticated" if is_auth else "subprocess_failed",
+                (f"cookies likely expired ({age/86400:.0f}d old, from {source})"
+                 if (is_auth and age is not None)
+                 else f"{backend_label} bookmarks failed: {err[:200]}"),
+                data={"backend": backend_label,
+                      "hint": "run: macli x cookies-save"} if is_auth else None,
+            )
         else:
             print(f"{backend_label} bookmarks failed: {err}", file=sys.stderr)
-            if r and _is_auth_error(err):
+            if is_auth:
                 age, source, _ = _cookies_status()
                 if age is None:
                     print("\n  → cookies missing. run: macli x cookies-save", file=sys.stderr)
@@ -694,8 +734,7 @@ def cmd_x_archive(rest, cache):
             tweets = parsed
     except json.JSONDecodeError as e:
         if as_json:
-            _print_json(_envelope(False, error_code="internal_error",
-                                  error_message=f"{backend_label} returned invalid JSON: {e}"))
+            _emit_err("internal_error", f"{backend_label} returned invalid JSON: {e}")
         else:
             print(f"{backend_label} returned invalid JSON: {e}", file=sys.stderr)
         conn.close()
@@ -721,12 +760,12 @@ def cmd_x_archive(rest, cache):
     conn.close()
 
     if as_json:
-        _print_json(_envelope(True, data={
+        _emit_ok({
             "backend": backend_label,
             "new_count": len(new),
             "total_count": total,
             "db_path": str(db_path),
-        }))
+        })
     else:
         print(f"archived {len(new)} new bookmarks → {db_path}")
     return 0
@@ -927,16 +966,36 @@ def route_x(argv):
 # or the user's existing wechat-mcp install as fallback.
 
 def _wechat_python():
+    """Find a wechat-mcp venv whose Python can actually `import wechat_mcp`.
+
+    Skipping the import check leaks a footgun: a venv whose `pip install -e .`
+    silently failed (leaving only setuptools/pip) still has `bin/python`
+    present, so a binary-only check picks it and every wx command blows up
+    with ModuleNotFoundError. Validate the module is importable too.
+    """
     candidates = [
         VENDOR / "wechat-mcp" / ".venv" / "bin" / "python",
         Path.home() / ".local/share/mcp-servers/wechat-mcp/.venv/bin/python",
     ]
+    broken = []
     for p in candidates:
-        if p.is_file() and os.access(p, os.X_OK):
-            return p
-    print("macli wx: no wechat-mcp venv found. run ./install.sh first.\n"
-          f"  expected: {candidates[0]}\n"
-          f"  or fallback: {candidates[1]}", file=sys.stderr)
+        if not (p.is_file() and os.access(p, os.X_OK)):
+            continue
+        try:
+            r = subprocess.run([str(p), "-c", "import wechat_mcp"],
+                               capture_output=True, text=True, timeout=10)
+            if r.returncode == 0:
+                return p
+            broken.append((p, (r.stderr or "import failed").strip().splitlines()[-1][:120]))
+        except (subprocess.TimeoutExpired, OSError) as e:
+            broken.append((p, str(e)[:120]))
+    msg = ["macli wx: no working wechat-mcp venv found. run ./install.sh or macli doctor --fix."]
+    if broken:
+        msg.append("  detected broken venvs (python present but wechat_mcp not importable):")
+        for p, why in broken:
+            msg.append(f"    {p}  →  {why}")
+    msg.append(f"  candidates checked: {' , '.join(str(c) for c in candidates)}")
+    print("\n".join(msg), file=sys.stderr)
     sys.exit(1)
 
 
@@ -948,20 +1007,12 @@ def _run_wechat_helper(script):
     return res
 
 
-def cmd_wx_send(args):
-    as_json = _has_flag(args, "--json")
-    args = [a for a in args if a != "--json"]
-    if len(args) < 2:
-        msg = "usage: macli wx send <contact> <text-or-file-path>"
-        if as_json:
-            _print_json(_envelope(False, error_code="invalid_args", error_message=msg))
-        else:
-            print(msg, file=sys.stderr)
-        return 2
-    contact, payload = args[0], args[1]
-    payload_path = Path(payload)
-    is_file = payload_path.is_file()
+def _wx_stage_and_send(contact, payload, is_file, payload_path):
+    """Steps: stage clipboard → navigate to contact → cmd+V + Return.
 
+    Returns (ok, error_code, error_message). On ok=True caller still needs to
+    verify the send via AX poll if verification is desired.
+    """
     if is_file:
         stage = f"""
 import sys
@@ -979,12 +1030,7 @@ print("clip_ok")
 """
     r = _run_wechat_helper(stage)
     if "clip_ok" not in r.stdout:
-        msg = "failed to stage clipboard"
-        if as_json:
-            _print_json(_envelope(False, error_code="internal_error", error_message=msg))
-        else:
-            print(f"macli wx: {msg}", file=sys.stderr)
-        return 1
+        return False, "internal_error", "failed to stage clipboard"
 
     nav = f"""
 import sys, json
@@ -995,12 +1041,7 @@ print(json.dumps(res, default=str))
 """
     r = _run_wechat_helper(nav)
     if "nav_done" not in r.stdout:
-        msg = f"could not navigate to '{contact}'"
-        if as_json:
-            _print_json(_envelope(False, error_code="not_found", error_message=msg))
-        else:
-            print(f"macli wx: {msg}", file=sys.stderr)
-        return 1
+        return False, "not_found", f"could not navigate to '{contact}'"
     time.sleep(0.4)
 
     osascript('''
@@ -1011,28 +1052,331 @@ print(json.dumps(res, default=str))
         key code 36
     end tell
     ''')
-    kind = "file" if is_file else "text"
-    if as_json:
-        # Preview: file uses absolute path, text truncates to 200 chars
-        preview = str(payload_path.resolve()) if is_file else payload[:200]
-        _print_json(_envelope(True, data={
+    return True, None, None
+
+
+def _wx_verify_last_message(timeout):
+    """Best-effort L2 verification: poll WeChat's message-list AX tree to confirm
+    the most recent message has no failure indicator (red exclamation / retry button).
+
+    Returns: dict with keys
+      verified (bool)         — True if last message has no error icon within timeout
+      has_error_icon (bool)   — True if a retry/failed indicator was detected
+      detected (str|None)     — which keyword triggered the error detection
+      error (str|None)        — internal error if AX traversal threw
+
+    Caveat: detection is heuristic; we look for AX descendants whose
+    role/identifier/title/description carry common failure markers. False negatives
+    are possible if WeChat's AX surface changes — in that case verified=True is
+    returned (no marker found within timeout). For files, callers should give
+    longer timeout to absorb upload time.
+    """
+    script = f'''
+import time, json
+out = {{"verified": False, "has_error_icon": False, "detected": None, "error": None}}
+try:
+    from ApplicationServices import (
+        kAXChildrenAttribute, kAXRoleAttribute, kAXIdentifierAttribute,
+        kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute,
+    )
+    from wechat_mcp.wechat_accessibility import get_wechat_ax_app, ax_get
+    from wechat_mcp.fetch_messages_by_chat_utils import get_messages_list
+except Exception as e:
+    out["error"] = "import_failed: " + str(e)
+    print(json.dumps(out)); raise SystemExit(0)
+
+# WeChat 4.x failure signals are diverse:
+#   - "重发" / "resend" — retry button on a failed bubble (network drop, etc.)
+#   - "发送失败" / "send failed" — inline error text
+#   - "消息已发出，但被对方拒收了。" — system-message row inserted after
+#     the user bubble when the recipient has deleted/blocked the sender
+#   - "已被对方拉黑" — blocking notice (rare)
+#   - "rejected" — English UI variant
+FAIL_KEYWORDS = (
+    "retry", "resend", "重发", "重新发送",
+    "发送失败", "send failed", "failed to send",
+    "被对方拒收", "已被对方拒收", "rejected by",
+    "已被对方拉黑", "拉黑",
+)
+
+def find_failure(el, depth=0):
+    if depth > 6:
+        return None
+    try:
+        role = ax_get(el, kAXRoleAttribute) or ""
+        ident = ax_get(el, kAXIdentifierAttribute) or ""
+        title = ax_get(el, kAXTitleAttribute) or ""
+        desc = ax_get(el, kAXDescriptionAttribute) or ""
+        val = ax_get(el, kAXValueAttribute) or ""
+        blob = (str(ident) + " " + str(title) + " " + str(desc) + " " + str(val)).lower()
+        for kw in FAIL_KEYWORDS:
+            if kw.lower() in blob:
+                return kw
+        for child in ax_get(el, kAXChildrenAttribute) or []:
+            r = find_failure(child, depth + 1)
+            if r: return r
+    except Exception:
+        pass
+    return None
+
+deadline = time.time() + {timeout}
+last_error = None
+polls = 0
+empty_polls = 0
+max_rows_seen = 0
+saw_rows = False
+
+# Failure signals can land as a separate system-message row inserted AFTER
+# the user's bubble; scan the most recent few rows, not just rows[-1].
+# Strategy: poll until we either spot a failure mark or run out of time.
+# Each AX traversal is ~3-5s on a busy chat, so we lean on the full timeout
+# as the observation window itself — no second-derivative "clean counter".
+SCAN_RECENT = 3
+
+while time.time() < deadline:
+    polls += 1
+    try:
+        app = get_wechat_ax_app()
+        msg_list = get_messages_list(app)
+        rows = ax_get(msg_list, "AXRows") or ax_get(msg_list, kAXChildrenAttribute) or []
+        if len(rows) > max_rows_seen:
+            max_rows_seen = len(rows)
+        if rows:
+            saw_rows = True
+            mark = None
+            for r in rows[-SCAN_RECENT:]:
+                m = find_failure(r)
+                if m:
+                    mark = m
+                    break
+            if mark:
+                out["has_error_icon"] = True
+                out["detected"] = mark
+                out["verified"] = False
+                break
+        else:
+            empty_polls += 1
+    except Exception as e:
+        last_error = str(e)
+    time.sleep(0.35)
+
+# Final decision:
+#   - mark found → has_error_icon already set, verified=False
+#   - rows visible at least once during the full timeout window, never any mark
+#     → confident no failure, verified=True
+#   - never saw rows → AX dead/permission/chat empty → can't verify
+if not out["has_error_icon"]:
+    if saw_rows:
+        out["verified"] = True
+    elif last_error:
+        out["error"] = last_error
+    else:
+        out["error"] = "no message rows visible during verify window"
+
+out["_debug"] = {{"polls": polls, "empty_polls": empty_polls,
+                  "max_rows_seen": max_rows_seen}}
+
+print(json.dumps(out, ensure_ascii=False, default=str))
+'''
+    r = _run_wechat_helper(script)
+    raw = (r.stdout or "").strip().splitlines()
+    if not raw:
+        return {"verified": False, "has_error_icon": False, "error": "no helper output"}
+    try:
+        return json.loads(raw[-1])
+    except json.JSONDecodeError:
+        return {"verified": False, "has_error_icon": False, "error": f"non-JSON: {raw[-1][:120]}"}
+
+
+def _parse_int_flag(args, flag, default):
+    if flag not in args:
+        return default, args
+    i = args.index(flag)
+    if i + 1 >= len(args):
+        return default, args
+    try:
+        val = int(args[i + 1])
+    except ValueError:
+        return default, args
+    return val, args[:i] + args[i + 2:]
+
+
+# Failure-code → notification title. Distinct titles let users triage at a
+# glance: "拒收" (永久 — 拉黑/拒收) vs "状态不明" (verify 超时) vs general "失败".
+_WX_FAIL_TITLES = {
+    "send_failed_at_recipient": "macli wx: 已被拒收",
+    "verify_timeout":           "macli wx: 状态不明",
+    "send_failed":              "macli wx: 发送失败",
+    "not_found":                "macli wx: 联系人未找到",
+    "verify_error":             "macli wx: 校验异常",
+    "internal_error":           "macli wx: 内部错误",
+}
+
+
+def _wx_send_record(contact, kind, ok, attempts, code=None,
+                    detected=None, msg=None):
+    """Append one NDJSON line to ~/.tx/wx_send.log, and on failure ALSO fire a
+    desktop notification when stdout is not a TTY (cron/launchd/agent).
+
+    Rationale: an interactive terminal already shows stderr + the failed
+    bubble in WeChat, so a banner is just noise. Non-interactive callers
+    (cron, agent subprocess, redirected stdout) need the active signal —
+    otherwise failures live and die in a log no human reads.
+    """
+    # 1. Structured append-only log (success + failure)
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        log_path = CACHE_DIR / "wx_send.log"
+        entry = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "contact": contact,
             "kind": kind,
-            "payload_preview": preview,
-            "sent_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        }))
+            "ok": bool(ok),
+            "attempts": attempts,
+            "error_code": code,
+            "detected": detected,
+        }
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+    # 2. Conditional notification — only on failure, only when non-interactive
+    if ok:
+        return
+    try:
+        is_tty = sys.stdout.isatty()
+    except (ValueError, AttributeError):
+        is_tty = False
+    if is_tty:
+        return
+    title = _WX_FAIL_TITLES.get(code, "macli wx: 失败")
+    detail = detected or (msg or "")
+    body = f"→ {contact}  ({detail[:60]})" if detail else f"→ {contact}"
+    _notify_user(title, body)
+
+
+def cmd_wx_send(args):
+    as_json, args = _pop_flag(list(args), "--json")
+    no_verify, args = _pop_flag(args, "--no-verify")
+
+    # Parse --retry N (default 1; only attempts a single retry after a failure)
+    retry_n, args = _parse_int_flag(args, "--retry", 1)
+    retry_n = max(0, retry_n)
+
+    # Optional override of verify timeout
+    verify_timeout, args = _parse_int_flag(args, "--verify-timeout", -1)
+
+    if len(args) < 2:
+        msg = "usage: macli wx send <contact> <text-or-file-path> [--retry N] [--no-verify]"
+        if as_json:
+            _emit_err("invalid_args", msg)
+        else:
+            print(msg, file=sys.stderr)
+        return 2
+
+    contact, payload = args[0], args[1]
+    payload_path = Path(payload)
+    is_file = payload_path.is_file()
+    kind = "file" if is_file else "text"
+    preview = str(payload_path.resolve()) if is_file else payload[:200]
+
+    if verify_timeout <= 0:
+        # Text: server round-trip + recipient-side check (e.g. block / 拒收
+        # system message) can take 3-5s before WeChat inserts the failure row.
+        # File: upload time dominates; 30s is a reasonable cap, override with
+        # --verify-timeout for larger files.
+        verify_timeout = 30 if is_file else 6
+
+    # Recipient-side rejection (block / 拒收 / account deleted) is permanent
+    # for this run — retrying just spams the chat and risks AX flakiness.
+    NON_RETRIABLE = ("被对方拒收", "已被对方拒收", "已被对方拉黑", "拉黑", "rejected by")
+
+    def _confirmed_recipient_rejection(v):
+        if not v or not v.get("has_error_icon"):
+            return False
+        d = (v.get("detected") or "").lower()
+        return any(kw.lower() in d for kw in NON_RETRIABLE)
+
+    last_verify = None
+    last_perform_err = None
+    attempts = 0
+    while attempts <= retry_n:
+        attempts += 1
+        ok, err_code, err_msg = _wx_stage_and_send(contact, payload, is_file, payload_path)
+        if not ok:
+            last_perform_err = (err_code, err_msg)
+            if attempts > retry_n:
+                break
+            time.sleep(0.8)
+            continue
+
+        if no_verify:
+            data = {"contact": contact, "kind": kind, "payload_preview": preview,
+                    "sent_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "verified": False, "verify_skipped": True, "attempts": attempts}
+            if as_json:
+                _emit_ok(data)
+            else:
+                print(f"✓ sent {kind} → {contact}  (unverified)")
+            _wx_send_record(contact, kind, True, attempts)
+            return 0
+
+        v = _wx_verify_last_message(verify_timeout)
+        last_verify = v
+        if v.get("verified"):
+            data = {"contact": contact, "kind": kind, "payload_preview": preview,
+                    "sent_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "verified": True, "attempts": attempts}
+            if as_json:
+                _emit_ok(data)
+            else:
+                print(f"✓ sent {kind} → {contact}  (verified)")
+            _wx_send_record(contact, kind, True, attempts)
+            return 0
+
+        # If verify positively confirmed a permanent failure, stop retrying.
+        if _confirmed_recipient_rejection(v):
+            break
+        if attempts > retry_n:
+            break
+        time.sleep(0.8)
+
+    # All attempts exhausted. Pick the most informative error:
+    # 1. A verified-failure signal (red icon / system rejection) beats
+    #    a transient perform error from a later retry.
+    # 2. Otherwise fall back to the perform error (e.g. navigation failed).
+    # 3. Otherwise pure verify timeout.
+    if last_verify and last_verify.get("has_error_icon"):
+        code = ("send_failed_at_recipient"
+                if _confirmed_recipient_rejection(last_verify)
+                else "send_failed")
+        msg = f"WeChat surfaced a failure indicator (matched: {last_verify.get('detected')!r})"
+    elif last_perform_err:
+        code, msg = last_perform_err
+    elif last_verify and last_verify.get("error"):
+        code = "verify_error"
+        msg = f"verification could not run: {last_verify.get('error')}"
     else:
-        print(f"✓ sent {kind} → {contact}")
-    return 0
+        code = "verify_timeout"
+        msg = f"verification timed out after {verify_timeout}s × {attempts} attempt(s)"
+
+    if as_json:
+        _emit_err(code, msg, data={"contact": contact, "kind": kind,
+                                    "attempts": attempts, "last_verify": last_verify})
+    else:
+        print(f"macli wx: send failed after {attempts} attempt(s): {msg}", file=sys.stderr)
+    _wx_send_record(contact, kind, False, attempts, code=code,
+                    detected=(last_verify or {}).get("detected"), msg=msg)
+    return 1
 
 
 def cmd_wx_read(args):
-    as_json = _has_flag(args, "--json")
-    args = [a for a in args if a != "--json"]
+    as_json, args = _pop_flag(args, "--json")
     if not args:
         msg = "usage: macli wx read <contact> [--limit N]"
         if as_json:
-            _print_json(_envelope(False, error_code="invalid_args", error_message=msg))
+            _emit_err("invalid_args", msg)
         else:
             print(msg, file=sys.stderr)
         return 2
@@ -1042,18 +1386,35 @@ def cmd_wx_read(args):
         if i + 1 < len(args):
             limit = int(args[i + 1])
 
+    # fetch_recent_messages operates on the currently-open chat, so we have
+    # to navigate first. (The patched wechat-mcp source only exports
+    # fetch_recent_messages — not fetch_messages_by_chat — so an older copy
+    # of this command that imported the latter was always broken.)
     script = f"""
 import json
-from wechat_mcp.fetch_messages_by_chat_utils import fetch_messages_by_chat
-msgs = fetch_messages_by_chat({repr(contact)}, last_n={limit})
-print(json.dumps(msgs, ensure_ascii=False, default=str))
+from dataclasses import asdict, is_dataclass
+from wechat_mcp.wechat_accessibility import open_chat_for_contact
+from wechat_mcp.fetch_messages_by_chat_utils import fetch_recent_messages
+
+nav = open_chat_for_contact({repr(contact)})
+if nav and isinstance(nav, dict) and nav.get("error"):
+    print(json.dumps({{"_macli_error": "navigation_failed", "detail": nav.get("error")}}, ensure_ascii=False))
+    raise SystemExit(0)
+
+msgs = fetch_recent_messages(last_n={limit})
+
+def _norm(m):
+    if is_dataclass(m): return asdict(m)
+    return m
+
+print(json.dumps([_norm(m) for m in msgs], ensure_ascii=False, default=str))
 """
     r = _run_wechat_helper(script)
     raw = r.stdout.strip()
     if r.returncode != 0 or not raw:
         msg = (r.stderr or f"exit {r.returncode}").strip()[:200]
         if as_json:
-            _print_json(_envelope(False, error_code="subprocess_failed", error_message=msg))
+            _emit_err("subprocess_failed", msg)
         else:
             sys.stdout.write(r.stdout)
         return r.returncode or 1
@@ -1061,30 +1422,90 @@ print(json.dumps(msgs, ensure_ascii=False, default=str))
         msgs = json.loads(raw)
     except json.JSONDecodeError:
         if as_json:
-            _print_json(_envelope(False, error_code="internal_error",
-                                  error_message=f"helper returned non-JSON: {raw[:200]}"))
+            _emit_err("internal_error", f"helper returned non-JSON: {raw[:200]}")
         else:
             sys.stdout.write(r.stdout)
         return 1
     if as_json:
-        _print_json(_envelope(True, data={
+        _emit_ok({
             "contact": contact,
             "count": len(msgs) if isinstance(msgs, list) else (
                 len(msgs.get("result", [])) if isinstance(msgs, dict) else 0
             ),
             "messages": msgs,
-        }))
+        })
     else:
         print(json.dumps(msgs, indent=2, ensure_ascii=False, default=str))
     return r.returncode
 
 
+def cmd_wx_contacts(args):
+    """List WeChat contacts (chat sessions) currently exposed in the sidebar.
+
+    Uses wechat-mcp's collect_chat_elements(). Returns the set of chat names
+    the AX tree can reach without scrolling/search. On WeChat 4.x this is
+    typically the user's full session history.
+    """
+    as_json, args = _pop_flag(args, "--json")
+    filt = args[0] if args else None
+
+    script = '''
+import json
+try:
+    from wechat_mcp.wechat_accessibility import get_wechat_ax_app, collect_chat_elements
+    app = get_wechat_ax_app()
+    chats = collect_chat_elements(app)
+    print(json.dumps(sorted(chats.keys()), ensure_ascii=False))
+except Exception as e:
+    print(json.dumps({"error": str(e)}, ensure_ascii=False))
+'''
+    r = _run_wechat_helper(script)
+    raw = (r.stdout or "").strip().splitlines()
+    if not raw:
+        msg = "no helper output (is WeChat running and Accessibility granted?)"
+        if as_json:
+            _emit_err("subprocess_failed", msg)
+        else:
+            print(f"macli wx: {msg}", file=sys.stderr)
+        return 1
+    try:
+        parsed = json.loads(raw[-1])
+    except json.JSONDecodeError:
+        msg = f"helper returned non-JSON: {raw[-1][:120]}"
+        if as_json:
+            _emit_err("internal_error", msg)
+        else:
+            print(f"macli wx: {msg}", file=sys.stderr)
+        return 1
+
+    if isinstance(parsed, dict) and "error" in parsed:
+        if as_json:
+            _emit_err("subprocess_failed", parsed["error"])
+        else:
+            print(f"macli wx contacts: {parsed['error']}", file=sys.stderr)
+        return 1
+
+    names = parsed if isinstance(parsed, list) else []
+    if filt:
+        f = filt.lower()
+        names = [n for n in names if f in n.lower()]
+
+    if as_json:
+        _emit_ok({"count": len(names), "contacts": names})
+    else:
+        for n in names:
+            print(n)
+        print(f"\n({len(names)} contacts)")
+    return 0
+
+
 def route_wechat(args):
     if not args:
-        print("usage: macli wx <send|read> [args...]", file=sys.stderr); return 2
+        print("usage: macli wx <send|read|contacts> [args...]", file=sys.stderr); return 2
     sub, rest = args[0], args[1:]
-    if sub == "send": return cmd_wx_send(rest)
-    if sub == "read": return cmd_wx_read(rest)
+    if sub == "send":     return cmd_wx_send(rest)
+    if sub == "read":     return cmd_wx_read(rest)
+    if sub == "contacts": return cmd_wx_contacts(rest)
     print(f"macli wx: unknown subcommand '{sub}'", file=sys.stderr); return 2
 
 
@@ -1119,12 +1540,10 @@ def _kb_extract_script(md_path):
 
 
 def cmd_mac_kb(args):
-    as_json = _has_flag(args, "--json")
-    args = [a for a in args if a != "--json"]
+    as_json, args = _pop_flag(args, "--json")
     if not args:
         if as_json:
-            _print_json(_envelope(False, error_code="invalid_args",
-                                  error_message="usage: macli mac kb <script-id> [arg1 ...]"))
+            _emit_err("invalid_args", "usage: macli mac kb <script-id> [arg1 ...]")
         else:
             print("usage: macli mac kb <script-id> [arg1 ...]", file=sys.stderr)
         return 2
@@ -1132,16 +1551,14 @@ def cmd_mac_kb(args):
     idx = _kb_index()
     if script_id not in idx:
         if as_json:
-            _print_json(_envelope(False, error_code="not_found",
-                                  error_message=f"kb id '{script_id}' not found"))
+            _emit_err("not_found", f"kb id '{script_id}' not found")
         else:
             print(f"macli mac kb: id '{script_id}' not found", file=sys.stderr)
         return 1
     script, lang = _kb_extract_script(idx[script_id])
     if script is None:
         if as_json:
-            _print_json(_envelope(False, error_code="internal_error",
-                                  error_message=f"no code block in {idx[script_id]}"))
+            _emit_err("internal_error", f"no code block in {idx[script_id]}")
         else:
             print(f"macli mac kb: no code block in {idx[script_id]}", file=sys.stderr)
         return 1
@@ -1150,33 +1567,29 @@ def cmd_mac_kb(args):
     cmd = ["osascript"] + (["-l", "JavaScript"] if lang.lower() in ("javascript", "jxa") else []) + ["-e", script]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if as_json:
-        ok = r.returncode == 0
-        _print_json(_envelope(
-            ok,
-            data={
-                "script_id": script_id,
-                "args": script_args,
-                "exit_code": r.returncode,
-                "stdout": r.stdout,
-                "stderr": r.stderr,
-            },
-            error_code=None if ok else "subprocess_failed",
-            error_message=None if ok else (r.stderr.strip() or f"exit {r.returncode}"),
-        ))
+        data = {
+            "script_id": script_id, "args": script_args,
+            "exit_code": r.returncode, "stdout": r.stdout, "stderr": r.stderr,
+        }
+        if r.returncode == 0:
+            _emit_ok(data)
+        else:
+            _emit_err("subprocess_failed",
+                      r.stderr.strip() or f"exit {r.returncode}", data=data)
         return r.returncode
     sys.stdout.write(r.stdout); sys.stderr.write(r.stderr)
     return r.returncode
 
 
 def cmd_mac_kb_list(args):
-    as_json = _has_flag(args, "--json")
+    as_json, _ = _pop_flag(args, "--json")
     idx = _kb_index()
     scripts = [
         {"id": kb_id, "path": str(idx[kb_id].relative_to(MACOS_AUTOMATOR_KB))}
         for kb_id in sorted(idx)
     ]
     if as_json:
-        _print_json(_envelope(True, data={"count": len(scripts), "scripts": scripts}))
+        _emit_ok({"count": len(scripts), "scripts": scripts})
         return 0
     for s in scripts:
         print(f"  {s['id']:48s}  {s['path']}")
@@ -1184,37 +1597,202 @@ def cmd_mac_kb_list(args):
     return 0
 
 
+KB_SEARCH_INDEX = CACHE_DIR / "kb-search-index.json"
+
+
+def _kb_parse_frontmatter(text):
+    """Parse a KB md's YAML frontmatter. Stdlib-only; only handles the shapes
+    actually used by macos-automator-mcp's KB (scalars + folded `>-` + simple
+    bullet lists). Returns dict with id/title/description/keywords/category."""
+    m = re.match(r"^---\n(.*?)\n---", text, re.DOTALL)
+    if not m:
+        return None
+    fm = m.group(1)
+    out = {"id": "", "title": "", "description": "", "keywords": [], "category": ""}
+    for key in ("id", "title", "category", "language"):
+        m2 = re.search(rf'^{key}:\s*"?([^"\n]*?)"?\s*$', fm, re.MULTILINE)
+        if m2:
+            out[key if key != "language" else "category"] = (
+                out.get(key if key != "language" else "category") or m2.group(1).strip()
+            )
+    # Folded description (>-) or single-line
+    m3 = re.search(r"^description:\s*>-?\s*\n((?:  .*\n?)+)", fm, re.MULTILINE)
+    if m3:
+        out["description"] = " ".join(l.strip() for l in m3.group(1).splitlines() if l.strip())
+    else:
+        m3 = re.search(r'^description:\s*"?([^"\n]*?)"?\s*$', fm, re.MULTILINE)
+        if m3:
+            out["description"] = m3.group(1).strip()
+    # Keywords as YAML list
+    m4 = re.search(r"^keywords:\s*\n((?:  - .*\n?)+)", fm, re.MULTILINE)
+    if m4:
+        out["keywords"] = [
+            re.sub(r'^  - ', "", l).strip().strip('"')
+            for l in m4.group(1).splitlines()
+            if l.strip()
+        ]
+    return out
+
+
+def _kb_newest_mtime(kb_dir):
+    newest = 0.0
+    for p in kb_dir.rglob("*.md"):
+        try:
+            m = p.stat().st_mtime
+            if m > newest:
+                newest = m
+        except OSError:
+            pass
+    return newest
+
+
+def _kb_build_search_index(kb_dir, idx_path):
+    entries = []
+    for md in kb_dir.rglob("*.md"):
+        try:
+            text = md.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        fm = _kb_parse_frontmatter(text)
+        if not fm or not fm.get("id"):
+            continue
+        entries.append({
+            "id": fm["id"],
+            "title": fm["title"],
+            "description": fm["description"],
+            "keywords": fm["keywords"],
+            "category": fm["category"],
+            "path": str(md.relative_to(kb_dir)),
+        })
+    idx_path.parent.mkdir(parents=True, exist_ok=True)
+    idx_path.write_text(
+        json.dumps({"kb_mtime": _kb_newest_mtime(kb_dir), "entries": entries},
+                   ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return entries
+
+
+def _kb_load_search_index():
+    if not MACOS_AUTOMATOR_KB.is_dir():
+        return []
+    if not KB_SEARCH_INDEX.exists():
+        return _kb_build_search_index(MACOS_AUTOMATOR_KB, KB_SEARCH_INDEX)
+    try:
+        cached = json.loads(KB_SEARCH_INDEX.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return _kb_build_search_index(MACOS_AUTOMATOR_KB, KB_SEARCH_INDEX)
+    cached_mtime = float(cached.get("kb_mtime", 0))
+    if _kb_newest_mtime(MACOS_AUTOMATOR_KB) > cached_mtime + 1:
+        return _kb_build_search_index(MACOS_AUTOMATOR_KB, KB_SEARCH_INDEX)
+    return cached.get("entries", [])
+
+
+def _kb_tokenize(s):
+    return [t for t in re.split(r"[^\w]+", (s or "").lower()) if len(t) >= 2]
+
+
+def _kb_score(entry, query_tokens):
+    """Weighted token-overlap score. Title > keywords > id > description > category."""
+    title_t = set(_kb_tokenize(entry.get("title", "")))
+    desc_t = set(_kb_tokenize(entry.get("description", "")))
+    kw_t = set()
+    for k in entry.get("keywords", []) or []:
+        kw_t.update(_kb_tokenize(k))
+    id_t = set(_kb_tokenize(entry.get("id", "")))
+    cat_t = set(_kb_tokenize(entry.get("category", "")))
+    score = 0.0
+    for q in query_tokens:
+        if q in title_t: score += 3.0
+        if q in kw_t:    score += 2.5
+        if q in id_t:    score += 1.5
+        if q in desc_t: score += 1.0
+        if q in cat_t:   score += 0.5
+    return score
+
+
+def cmd_mac_kb_search(args):
+    as_json, args = _pop_flag(args, "--json")
+    max_n, args = _parse_int_flag(args, "--max", 10)
+    max_n = max(1, max_n)
+
+    if not args:
+        msg = "usage: macli mac kb-search <query> [--max N]"
+        if as_json:
+            _emit_err("invalid_args", msg)
+        else:
+            print(msg, file=sys.stderr)
+        return 2
+
+    query = " ".join(args)
+    tokens = _kb_tokenize(query)
+    entries = _kb_load_search_index()
+    if not tokens:
+        if as_json:
+            _emit_ok({"query": query, "count": 0,
+                      "indexed": len(entries), "results": []})
+        else:
+            print("(no searchable tokens in query)")
+        return 0
+
+    scored = []
+    for e in entries:
+        s = _kb_score(e, tokens)
+        if s > 0:
+            scored.append((s, e))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = scored[:max_n]
+
+    if as_json:
+        _emit_ok({
+            "query": query,
+            "indexed": len(entries),
+            "count": len(top),
+            "results": [{
+                "id": e["id"],
+                "title": e["title"],
+                "path": e["path"],
+                "score": round(s, 2),
+                "description": (e.get("description") or "")[:200],
+                "keywords": e.get("keywords") or [],
+            } for s, e in top],
+        })
+        return 0
+    if not top:
+        print(f"(no matches in {len(entries)} indexed scripts)")
+        return 0
+    for s, e in top:
+        print(f"  {e['id']:42s}  score={s:.1f}  {e.get('title','')}")
+    print(f"\n({len(top)} results / {len(entries)} indexed)")
+    return 0
+
+
 def cmd_mac_script(args):
-    as_json = _has_flag(args, "--json")
-    args = [a for a in args if a != "--json"]
+    as_json, args = _pop_flag(args, "--json")
     if not args:
         if as_json:
-            _print_json(_envelope(False, error_code="invalid_args",
-                                  error_message="usage: macli mac script '<applescript code>'"))
+            _emit_err("invalid_args", "usage: macli mac script '<applescript code>'")
         else:
             print("usage: macli mac script '<applescript code>'", file=sys.stderr)
         return 2
     r = osascript(args[0], timeout=60)
     if as_json:
-        ok = r.returncode == 0
-        _print_json(_envelope(
-            ok,
-            data={"exit_code": r.returncode, "stdout": r.stdout, "stderr": r.stderr},
-            error_code=None if ok else "subprocess_failed",
-            error_message=None if ok else (r.stderr.strip() or f"exit {r.returncode}"),
-        ))
+        data = {"exit_code": r.returncode, "stdout": r.stdout, "stderr": r.stderr}
+        if r.returncode == 0:
+            _emit_ok(data)
+        else:
+            _emit_err("subprocess_failed",
+                      r.stderr.strip() or f"exit {r.returncode}", data=data)
         return r.returncode
     sys.stdout.write(r.stdout); sys.stderr.write(r.stderr)
     return r.returncode
 
 
 def cmd_mac_dark_mode(args):
-    as_json = _has_flag(args, "--json")
-    args = [a for a in args if a != "--json"]
+    as_json, args = _pop_flag(args, "--json")
     if not args or args[0] not in ("on", "off", "toggle"):
         if as_json:
-            _print_json(_envelope(False, error_code="invalid_args",
-                                  error_message="usage: macli mac dark-mode <on|off|toggle>"))
+            _emit_err("invalid_args", "usage: macli mac dark-mode <on|off|toggle>")
         else:
             print("usage: macli mac dark-mode <on|off|toggle>", file=sys.stderr)
         return 2
@@ -1226,8 +1804,7 @@ def cmd_mac_dark_mode(args):
     r = osascript(script)
     if r.returncode != 0:
         if as_json:
-            _print_json(_envelope(False, error_code="subprocess_failed",
-                                  error_message=r.stderr.strip()))
+            _emit_err("subprocess_failed", r.stderr.strip())
         else:
             print(r.stderr.strip(), file=sys.stderr)
         return r.returncode
@@ -1235,15 +1812,14 @@ def cmd_mac_dark_mode(args):
     cur = osascript('tell app "System Events" to return dark mode of appearance preferences')
     current = (cur.stdout or "").strip()
     if as_json:
-        _print_json(_envelope(True, data={"requested": state, "current": current}))
+        _emit_ok({"requested": state, "current": current})
     else:
         print(f"✓ dark mode {state}")
     return 0
 
 
 def cmd_mac_volume(args):
-    as_json = _has_flag(args, "--json")
-    args = [a for a in args if a != "--json"]
+    as_json, args = _pop_flag(args, "--json")
     if not args:
         r = osascript('output volume of (get volume settings)')
         try:
@@ -1251,7 +1827,7 @@ def cmd_mac_volume(args):
         except (ValueError, AttributeError):
             vol = None
         if as_json:
-            _print_json(_envelope(True, data={"volume": vol, "changed": False}))
+            _emit_ok({"volume": vol, "changed": False})
         else:
             print(vol if vol is not None else r.stdout.strip())
         return 0
@@ -1259,14 +1835,13 @@ def cmd_mac_volume(args):
         vol = int(args[0])
     except ValueError:
         if as_json:
-            _print_json(_envelope(False, error_code="invalid_args",
-                                  error_message="usage: macli mac volume <0-100>"))
+            _emit_err("invalid_args", "usage: macli mac volume <0-100>")
         else:
             print("usage: macli mac volume <0-100>", file=sys.stderr)
         return 2
     osascript(f'set volume output volume {vol}')
     if as_json:
-        _print_json(_envelope(True, data={"volume": vol, "changed": True}))
+        _emit_ok({"volume": vol, "changed": True})
     else:
         print(f"✓ volume = {vol}")
     return 0
@@ -1274,10 +1849,12 @@ def cmd_mac_volume(args):
 
 def route_mac(args):
     if not args:
-        print("usage: macli mac <kb|kb-list|script|dark-mode|volume>", file=sys.stderr); return 2
+        print("usage: macli mac <kb|kb-list|kb-search|script|dark-mode|volume>",
+              file=sys.stderr); return 2
     sub, rest = args[0], args[1:]
     if sub == "kb":         return cmd_mac_kb(rest)
     if sub == "kb-list":    return cmd_mac_kb_list(rest)
+    if sub == "kb-search":  return cmd_mac_kb_search(rest)
     if sub == "script":     return cmd_mac_script(rest)
     if sub == "dark-mode":  return cmd_mac_dark_mode(rest)
     if sub == "volume":     return cmd_mac_volume(rest)
@@ -1288,7 +1865,156 @@ def route_mac(args):
 # Top-level router
 # =============================================================================
 
+def _pyi_tool():
+    """Return ('pipx', None) | ('uv', None) | (None, msg) — match install.sh's order."""
+    if shutil.which("pipx"):
+        return "pipx", None
+    if shutil.which("uv"):
+        return "uv", None
+    return None, "neither pipx nor uv is installed (brew install pipx)"
+
+
+def _doctor_repairs():
+    """Diagnose missing vendor pieces and attempt minimal repairs.
+
+    Returns list of (name, ok, detail) tuples. Detail is short stderr/msg.
+    Mirrors install.sh but only fires for what's actually broken.
+    """
+    repairs = []
+
+    def npm_build_and_link(name, subdir, also_install=False):
+        d = VENDOR / subdir
+        if not d.is_dir():
+            return (name, False, f"vendor dir missing: {d}")
+        try:
+            if also_install:
+                subprocess.run(["npm", "install", "--silent"],
+                               cwd=str(d), capture_output=True, text=True, timeout=240)
+                subprocess.run(["npm", "run", "build"],
+                               cwd=str(d), capture_output=True, text=True, timeout=240)
+            r = subprocess.run(["npm", "link", "--silent"],
+                               cwd=str(d), capture_output=True, text=True, timeout=120)
+            ok = r.returncode == 0 and shutil.which(name) is not None
+            return (name, ok, "" if ok else (r.stderr or r.stdout).strip()[:200])
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            return (name, False, str(e)[:200])
+
+    # 1. bird — already built; just needs `npm link`
+    if not shutil.which("bird"):
+        repairs.append(npm_build_and_link("bird", "bird"))
+
+    # 2. opencli — install + build + link
+    if not shutil.which("opencli"):
+        repairs.append(npm_build_and_link("opencli", "opencli", also_install=True))
+
+    # 3. macos-automator-mcp — only KB used; build only if dist missing
+    mc = VENDOR / "macos-automator-mcp"
+    if mc.is_dir() and not (mc / "dist").is_dir():
+        try:
+            subprocess.run(["npm", "install", "--silent"], cwd=str(mc),
+                           capture_output=True, text=True, timeout=240)
+            r = subprocess.run(["npm", "run", "build"], cwd=str(mc),
+                               capture_output=True, text=True, timeout=240)
+            ok = (mc / "dist").is_dir()
+            repairs.append(("macos-automator-mcp build", ok,
+                            "" if ok else (r.stderr or r.stdout).strip()[:200]))
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            repairs.append(("macos-automator-mcp build", False, str(e)[:200]))
+
+    # 4. twitter-cli — pipx/uv editable install (puts `twitter` in PATH)
+    if not shutil.which("twitter") and (VENDOR / "twitter-cli").is_dir():
+        tool, err = _pyi_tool()
+        if tool == "pipx":
+            r = subprocess.run(["pipx", "install", "-e", str(VENDOR / "twitter-cli")],
+                               capture_output=True, text=True, timeout=300)
+            ok = r.returncode == 0 and shutil.which("twitter") is not None
+            repairs.append(("twitter-cli", ok, "" if ok else r.stderr.strip()[:200]))
+        elif tool == "uv":
+            r = subprocess.run(["uv", "tool", "install", "-e", str(VENDOR / "twitter-cli")],
+                               capture_output=True, text=True, timeout=300)
+            ok = r.returncode == 0 and shutil.which("twitter") is not None
+            repairs.append(("twitter-cli", ok, "" if ok else r.stderr.strip()[:200]))
+        else:
+            repairs.append(("twitter-cli", False, err))
+
+    # 5. wechat-mcp — must end up at vendor/wechat-mcp/.venv (path that
+    #    _wechat_python checks). pipx puts its venv elsewhere, so use a real
+    #    python3 -m venv right next to the source.
+    #
+    #    Treat "python binary exists but `import wechat_mcp` fails" as a
+    #    broken-venv case worth repairing — that's the exact footgun where a
+    #    prior `pip install -e .` silently failed and left a half-built venv.
+    wm = VENDOR / "wechat-mcp"
+    wm_venv = wm / ".venv"
+    wm_venv_py = wm_venv / "bin" / "python"
+
+    def _venv_can_import_wechat_mcp(py_path):
+        if not (py_path.is_file() and os.access(py_path, os.X_OK)):
+            return False
+        try:
+            r = subprocess.run([str(py_path), "-c", "import wechat_mcp"],
+                               capture_output=True, text=True, timeout=10)
+            return r.returncode == 0
+        except (subprocess.TimeoutExpired, OSError):
+            return False
+
+    if wm.is_dir() and not _venv_can_import_wechat_mcp(wm_venv_py):
+        # If venv directory exists but is broken, remove it before rebuilding.
+        if wm_venv.exists():
+            try:
+                shutil.rmtree(wm_venv)
+            except OSError as e:
+                repairs.append(("wechat-mcp venv (cleanup)", False, str(e)[:200]))
+
+        # wechat-mcp's pyproject.toml requires Python >=3.12. Default `python3`
+        # may resolve to an older interpreter (e.g. 3.10 in miniconda envs)
+        # which silently leaves the venv with only setuptools/pip — exactly the
+        # footgun this repair exists to fix.
+        py_candidates = ["python3.13", "python3.12", "python3"]
+        chosen_py = None
+        for cand in py_candidates:
+            path = shutil.which(cand)
+            if not path:
+                continue
+            try:
+                vr = subprocess.run([path, "-c",
+                                     "import sys; print(sys.version_info >= (3, 12))"],
+                                    capture_output=True, text=True, timeout=5)
+                if vr.returncode == 0 and "True" in vr.stdout:
+                    chosen_py = path
+                    break
+            except (subprocess.TimeoutExpired, OSError):
+                continue
+        if not chosen_py:
+            repairs.append(("wechat-mcp venv", False,
+                            "no Python ≥3.12 found on PATH (wechat-mcp requires it)"))
+        else:
+            try:
+                r1 = subprocess.run([chosen_py, "-m", "venv", str(wm_venv)],
+                                    capture_output=True, text=True, timeout=120)
+                if r1.returncode != 0:
+                    repairs.append(("wechat-mcp venv", False, r1.stderr.strip()[:200]))
+                else:
+                    pip = str(wm_venv / "bin" / "pip")
+                    r2 = subprocess.run([pip, "install", "-e", str(wm)],
+                                        capture_output=True, text=True, timeout=600)
+                    ok = r2.returncode == 0 and _venv_can_import_wechat_mcp(wm_venv_py)
+                    detail = (f"used {chosen_py}" if ok else
+                              (r2.stderr or r2.stdout).strip()[:300])
+                    repairs.append(("wechat-mcp venv", ok, detail))
+            except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+                repairs.append(("wechat-mcp venv", False, str(e)[:200]))
+
+    return repairs
+
+
 def cmd_doctor(args):
+    fix_mode, args = _pop_flag(args, "--fix")
+    as_json, _ = _pop_flag(args, "--json")
+
+    repairs = _doctor_repairs() if fix_mode else []
+
+    # Recompute state AFTER any repairs so the report reflects current truth
     idx = _kb_index()
     vendors_info = {
         "bird":                {"path": str(VENDOR / "bird"),                "present": (VENDOR / "bird").exists()},
@@ -1313,8 +2039,8 @@ def cmd_doctor(args):
         "status": cookie_label,
     }
 
-    if _has_flag(args, "--json"):
-        _print_json(_envelope(True, data={
+    if as_json:
+        data = {
             "version": VERSION,
             "root": str(ROOT),
             "vendors": vendors_info,
@@ -1322,7 +2048,13 @@ def cmd_doctor(args):
             "x_cache": {"path": str(CACHE_FILE), "age_hours": cache_age_hours},
             "cookies": cookies_info,
             "kb_count": len(idx),
-        }))
+        }
+        if fix_mode:
+            data["repairs"] = [
+                {"name": n, "ok": ok, "detail": d} for (n, ok, d) in repairs
+            ]
+            data["repairs_applied"] = len(repairs)
+        _emit_ok(data)
         return 0
 
     # Human-readable format
@@ -1343,6 +2075,110 @@ def cmd_doctor(args):
     if cookie_age is not None:
         print(f"X cookies: {cookie_source} ({cookies_info['age_days']}d, {cookie_label})")
     print(f"\nKB scripts: {len(idx)}")
+
+    if fix_mode:
+        print()
+        if not repairs:
+            print("== --fix: nothing to repair (all backends present) ==")
+        else:
+            print(f"== --fix: applied {len(repairs)} repair(s) ==")
+            for n, ok, detail in repairs:
+                icon = "✓" if ok else "✗"
+                line = f"  {icon}  {n}"
+                if detail:
+                    line += f"   {detail[:120]}"
+                print(line)
+    return 0
+
+
+def cmd_stats(args):
+    """Local-only usage statistics: bookmarks, cookies freshness, KB index.
+
+    No telemetry — reads ~/.tx/bookmarks.db, ~/.tx/cookies.env, and the
+    kb-search index file. Nothing leaves the machine.
+    """
+    as_json, _ = _pop_flag(args, "--json")
+    import sqlite3
+
+    # X bookmarks
+    db_path = Path(os.environ.get("TX_DB", "~/.tx/bookmarks.db")).expanduser()
+    bookmarks = {"total": 0, "last_synced_at": None, "top_authors": []}
+    if db_path.exists():
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM bookmarks")
+            bookmarks["total"] = cur.fetchone()[0]
+            cur.execute("SELECT MAX(synced_at) FROM bookmarks")
+            row = cur.fetchone()
+            bookmarks["last_synced_at"] = row[0] if row else None
+            cur.execute(
+                "SELECT author_username, COUNT(*) FROM bookmarks "
+                "WHERE author_username IS NOT NULL "
+                "GROUP BY author_username ORDER BY 2 DESC LIMIT 10"
+            )
+            bookmarks["top_authors"] = [
+                {"username": a, "count": c} for (a, c) in cur.fetchall()
+            ]
+            conn.close()
+        except sqlite3.OperationalError:
+            pass
+
+    # Cookies
+    age, source, label = _cookies_status()
+    cookies = {
+        "source": source,
+        "age_days": round(age / 86400, 2) if age is not None else None,
+        "status": label,
+    }
+
+    # KB index freshness
+    kb_total = len(_kb_load_search_index()) if MACOS_AUTOMATOR_KB.is_dir() else 0
+    kb_idx_age_hours = None
+    if KB_SEARCH_INDEX.exists():
+        kb_idx_age_hours = round(
+            (time.time() - KB_SEARCH_INDEX.stat().st_mtime) / 3600, 2
+        )
+
+    # Archive cron log
+    archive_log = CACHE_DIR / "archive.log"
+    archive_info = {"path": str(archive_log), "exists": archive_log.exists()}
+    if archive_log.exists():
+        st = archive_log.stat()
+        archive_info["size_bytes"] = st.st_size
+        archive_info["last_modified"] = time.strftime(
+            "%Y-%m-%dT%H:%M:%S", time.localtime(st.st_mtime)
+        )
+
+    if as_json:
+        _emit_ok({
+            "bookmarks": bookmarks,
+            "cookies": cookies,
+            "kb": {"indexed": kb_total, "index_age_hours": kb_idx_age_hours},
+            "archive_log": archive_info,
+            "data_dir": str(CACHE_DIR),
+        })
+        return 0
+
+    print(f"macli stats  —  local-only  ({CACHE_DIR})\n")
+    print("X bookmarks:")
+    print(f"  total:        {bookmarks['total']}")
+    print(f"  last sync:    {bookmarks['last_synced_at'] or 'never'}")
+    if bookmarks["top_authors"]:
+        print("  top authors:")
+        for a in bookmarks["top_authors"][:5]:
+            print(f"    @{a['username']:24s}  {a['count']}")
+    print()
+    print("X cookies:")
+    if cookies["source"]:
+        print(f"  source: {cookies['source']}  ({cookies['age_days']}d, {cookies['status']})")
+    else:
+        print(f"  status: {cookies['status']}")
+    print()
+    age_part = f", index age {kb_idx_age_hours:.1f}h" if kb_idx_age_hours is not None else ""
+    print(f"KB index:     {kb_total} scripts{age_part}")
+    if archive_info["exists"]:
+        print(f"archive cron log: {archive_log}  (last write {archive_info.get('last_modified')})")
     return 0
 
 
@@ -1359,25 +2195,30 @@ NAMESPACES
                              macli x archive
                              macli x download --tweet-url <url>
                              macli x post "hello"
-  macli wx send <contact> <text|file>
+  macli wx send <contact> <text|file> [--retry N] [--no-verify]
   macli wx read <contact> [--limit N]
+  macli wx contacts [filter]                     # list known WeChat contacts
   macli mac script '<applescript>'
   macli mac kb <script-id> [args...]
   macli mac kb-list                              # list 492 KB scripts
+  macli mac kb-search <query> [--max N]          # fuzzy keyword search
   macli mac dark-mode <on|off|toggle>
   macli mac volume [0-100]
 
 INTERNAL
-  macli doctor             diagnose all backends
+  macli doctor [--fix]     diagnose all backends; --fix auto-repairs missing pieces
+  macli stats              local-only usage stats (bookmarks, cookies, KB)
   macli --version
   macli --help / -h
 
 EXAMPLES
   macli x search "Claude Code"
   macli x archive                                # bookmarks → ~/.tx/bookmarks.db
-  macli wx send 老婆 "下班来接"
+  macli wx send 老婆 "下班来接"                  # default: verify + retry once
   macli wx send 老婆 ~/Downloads/合同.pdf
+  macli wx contacts 老                            # filter contacts containing "老"
   macli mac dark-mode on
+  macli mac kb-search "save webpage as PDF"
   macli mac kb safari_save_as_pdf ~/x.pdf
 """)
     return 0
@@ -1392,6 +2233,7 @@ def route(argv):
     head, rest = argv[0], argv[1:]
 
     if head == "doctor":              return cmd_doctor(rest)
+    if head == "stats":               return cmd_stats(rest)
     if head in ("x", "twitter"):      return route_x(rest)
     if head in ("wx", "wechat"):      return route_wechat(rest)
     if head in ("mac", "macos"):      return route_mac(rest)

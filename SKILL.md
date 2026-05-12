@@ -2,7 +2,7 @@
 name: macos-cli
 description: Use macos-cli (binary `macli`) for any macOS-side automation — X/Twitter ops, WeChat send/read, native macOS apps and system control, plus 132 web site adapters. Invoke whenever the user requests automation that runs on a Mac, including content posting, message sending, file/media handling, dark mode toggle, AppleScript execution, or Twitter archive sync.
 author: BuddhaYi
-version: "0.2.0"
+version: "0.4.0"
 platform: macOS-only
 binary: macli
 tags:

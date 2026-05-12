@@ -1,0 +1,135 @@
+#compdef macli
+# zsh completion for macli (macos-cli)
+# Install: ln -sf $(pwd)/completions/_macli ~/.zsh/completions/_macli
+#   then add to ~/.zshrc:  fpath=(~/.zsh/completions $fpath); autoload -Uz compinit && compinit
+# install.sh wires this automatically if a ~/.zsh/completions dir exists.
+
+_macli() {
+    local curcontext="$curcontext" state line
+    typeset -A opt_args
+
+    local -a namespaces
+    namespaces=(
+        'x:X/Twitter operations (twitter-cli + bird + opencli)'
+        'wx:WeChat send/read/contacts'
+        'mac:macOS automation (osascript + 492 KB scripts)'
+        'doctor:diagnose all vendored backends'
+        'help:show help'
+        '--version:print version'
+        '--help:show help'
+    )
+
+    local -a x_cmds wx_cmds mac_cmds
+    x_cmds=(
+        'search:search tweets'
+        'post:post a tweet'
+        'reply:reply to a tweet URL'
+        'like:like a tweet URL'
+        'retweet:retweet a URL'
+        'follow:follow user'
+        'unfollow:unfollow user'
+        'archive:sync bookmarks → ~/.tx/bookmarks.db'
+        'download:download max-quality media from a tweet'
+        'cookies-save:extract X cookies from a browser'
+        'auth:3-backend auth health check'
+        'doctor:X subsystem doctor'
+        'help:X command-level help'
+        'whoami:current account'
+        'home:home timeline'
+        'bookmarks:list bookmarks'
+        'mentions:recent mentions'
+        'news:AI-curated Explore content (bird)'
+        'about:account origin/metadata (bird)'
+        'user-posts:posts of a given user'
+    )
+    wx_cmds=(
+        'send:send text or file to a contact'
+        'read:read recent messages from a contact'
+        'contacts:list known contacts'
+    )
+    mac_cmds=(
+        'kb:run a KB script by id'
+        'kb-list:list all 492 KB scripts'
+        'kb-search:fuzzy keyword search KB'
+        'script:run arbitrary AppleScript'
+        'dark-mode:on / off / toggle'
+        'volume:get or set system volume (0-100)'
+    )
+
+    _arguments -C \
+        '1: :->namespace' \
+        '2: :->subcommand' \
+        '*: :->args'
+
+    case $state in
+        namespace)
+            _describe 'macli command' namespaces
+            ;;
+        subcommand)
+            case $words[2] in
+                x|twitter)        _describe 'x command' x_cmds ;;
+                wx|wechat)        _describe 'wx command' wx_cmds ;;
+                mac|macos)        _describe 'mac command' mac_cmds ;;
+                doctor)
+                    _values 'doctor flag' '--json[machine output]' '--fix[auto-repair missing vendor pieces]'
+                    ;;
+            esac
+            ;;
+        args)
+            case "$words[2]:$words[3]" in
+                mac:kb|macos:kb)
+                    # Dynamic: list 492 KB script ids on TAB
+                    local -a kb_ids
+                    kb_ids=( ${(f)"$(macli mac kb-list 2>/dev/null | awk 'NF>=2 && $1 !~ /^\(/{print $1}')"} )
+                    _describe 'KB script id' kb_ids
+                    ;;
+                mac:dark-mode|macos:dark-mode)
+                    _values 'state' on off toggle
+                    ;;
+                wx:send|wechat:send)
+                    if (( CURRENT == 4 )); then
+                        # Suggest contacts (cached via `macli wx contacts`); fall back to nothing
+                        local -a contacts
+                        contacts=( ${(f)"$(macli wx contacts 2>/dev/null | grep -v '^(' | grep -v '^$')"} )
+                        if (( ${#contacts[@]} > 0 )); then
+                            _describe 'contact' contacts
+                        fi
+                    else
+                        _files
+                        _values 'flag' '--json' '--no-verify' '--retry' '--verify-timeout'
+                    fi
+                    ;;
+                wx:read|wechat:read|wx:contacts|wechat:contacts)
+                    if (( CURRENT == 4 )) && [[ "$words[3]" == "read" ]]; then
+                        local -a contacts
+                        contacts=( ${(f)"$(macli wx contacts 2>/dev/null | grep -v '^(' | grep -v '^$')"} )
+                        (( ${#contacts[@]} > 0 )) && _describe 'contact' contacts
+                    else
+                        _values 'flag' '--json' '--limit'
+                    fi
+                    ;;
+                x:cookies-save)
+                    _values 'cookies flag' \
+                        '--from[browser source]:browser:(edge chrome safari firefox edge-stable)' \
+                        '--check-age[just report freshness, exit code reflects status]' \
+                        '--json'
+                    ;;
+                x:*)
+                    # Generic for any other x subcommand
+                    _values 'flag' '--json' '--max' '--limit' '--compact'
+                    ;;
+                mac:script)
+                    _values 'flag' '--json'
+                    ;;
+                mac:kb-search)
+                    _values 'flag' '--json' '--max'
+                    ;;
+                mac:volume)
+                    _values 'level' 0 25 50 75 100
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_macli "$@"

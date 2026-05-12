@@ -50,6 +50,16 @@ echo "==> 6. macos-cli main entry (X subsystem absorbed from magpie)"
 chmod +x "$SCRIPT_DIR/macli"
 ln -sf "$SCRIPT_DIR/macli" "$target/macli"
 
+echo "==> 7. zsh completion (optional)"
+zsh_comp_dir="$HOME/.zsh/completions"
+if [[ -d "$zsh_comp_dir" ]] || mkdir -p "$zsh_comp_dir" 2>/dev/null; then
+    ln -sf "$SCRIPT_DIR/completions/_macli" "$zsh_comp_dir/_macli"
+    echo "    linked: $zsh_comp_dir/_macli"
+    echo "    (ensure ~/.zshrc has:  fpath=(~/.zsh/completions \$fpath); autoload -Uz compinit && compinit)"
+else
+    echo "    skipped (could not create $zsh_comp_dir)"
+fi
+
 echo ""
 echo "✓ installed: $target/macli → $SCRIPT_DIR/macli"
 echo ""

@@ -3,19 +3,19 @@
 > Unified single-command CLI for macOS automation across X/Twitter, WeChat, and arbitrary native apps. All upstream dependencies **vendored** for offline reproducibility and immunity against upstream deletion.
 
 ```bash
-tx x search "Claude Code"          # → vendor/magpie (twitter-cli + bird + opencli)
-tx x archive                       # → vendor/magpie (SQLite incremental sync)
-tx wx send 老婆 "下班来接"          # → vendor/wechat-mcp (locally patched)
-tx wx send 老婆 ~/Downloads/x.pdf   # ↑ same, auto-detects file
-tx mac dark-mode toggle            # → osascript
-tx mac volume 50                   # → osascript
-tx mac kb safari_save_as_pdf x.pdf # → vendor/macos-automator-mcp KB (492 scripts)
-tx arxiv search "vision"           # → vendor/opencli arxiv adapter
+macli x search "Claude Code"          # → vendor/magpie (twitter-cli + bird + opencli)
+macli x archive                       # → vendor/magpie (SQLite incremental sync)
+macli wx send 老婆 "下班来接"          # → vendor/wechat-mcp (locally patched)
+macli wx send 老婆 ~/Downloads/x.pdf   # ↑ same, auto-detects file
+macli mac dark-mode toggle            # → osascript
+macli mac volume 50                   # → osascript
+macli mac kb safari_save_as_pdf x.pdf # → vendor/macos-automator-mcp KB (492 scripts)
+macli arxiv search "vision"           # → vendor/opencli arxiv adapter
 ```
 
-One Python file (`tx`, ~1200 LOC, no pip deps) + 5 vendored backends = 39 MB self-contained repo.
+One Python file (`macli`, ~1200 LOC, no pip deps) + 5 vendored backends = 39 MB self-contained repo.
 
-> **v0.2 note**: this project absorbed [magpie](https://github.com/BuddhaYi/magpie)'s X-routing logic directly into `tx`. magpie as a runtime layer no longer exists — `tx x ...` calls the absorbed code, then execs `twitter-cli` / `bird` / `opencli` directly. See changelog below.
+> **v0.2 note**: this project absorbed [magpie](https://github.com/BuddhaYi/magpie)'s X-routing logic directly into `macli`. magpie as a runtime layer no longer exists — `macli x ...` calls the absorbed code, then execs `twitter-cli` / `bird` / `opencli` directly. See changelog below.
 
 ---
 
@@ -33,12 +33,12 @@ One Python file (`tx`, ~1200 LOC, no pip deps) + 5 vendored backends = 39 MB sel
 ## Architecture
 
 ```
-tx <namespace> <action> [args...]
+macli <namespace> <action> [args...]
        │
-       ├─ tx x   ...  → vendor/magpie/tx (already routes bird + twitter-cli + opencli)
-       ├─ tx wx  ...  → vendor/wechat-mcp Python lib (locally patched)
-       ├─ tx mac ...  → vendor/macos-automator-mcp KB + osascript
-       └─ <legacy> ... → magpie (backward-compat passthrough)
+       ├─ macli x   ...  → twitter-cli / bird / opencli (X subsystem, absorbed from magpie in v0.2)
+       ├─ macli wx  ...  → vendor/wechat-mcp Python lib (locally patched)
+       ├─ macli mac ...  → vendor/macos-automator-mcp KB + osascript
+       └─ <legacy> ...   → X subsystem (backward-compat passthrough)
 ```
 
 ### Vendored backends
@@ -51,7 +51,7 @@ tx <namespace> <action> [args...]
 | `vendor/macos-automator-mcp/` | 492 reusable AppleScript/JXA snippets (KB only used) | `steipete/macos-automator-mcp` | ~3 MB |
 | `vendor/wechat-mcp/` | WeChat send/read via macOS Accessibility | `BiboyQG/WeChat-MCP` + **local patches** | ~2 k Python |
 
-The X routing logic itself (originally a separate `vendor/magpie/tx` file) was absorbed into top-level `tx` in v0.2 — `magpie` no longer exists as a runtime layer. See `LICENSES/magpie-MIT.txt` for the original attribution.
+The X routing logic itself (originally a separate `vendor/magpie/tx` file) was absorbed into top-level `macli` in v0.2 — `magpie` no longer exists as a runtime layer. See `LICENSES/magpie-MIT.txt` for the original attribution.
 
 See `vendor/UPSTREAM_PINS.md` for exact commit each was vendored from.
 
@@ -68,7 +68,7 @@ cd macos-cli
 `install.sh` does:
 1. `npm link` each vendored Node package
 2. `pipx install -e` each vendored Python package (editable, so patches stay)
-3. Symlinks `tx` into your PATH
+3. Symlinks `macli` into your PATH
 
 Requires: macOS, Python ≥ 3.10, Node ≥ 18, `npm`, `pipx` or `uv`.
 
@@ -79,22 +79,22 @@ Requires: macOS, Python ≥ 3.10, Node ≥ 18, `npm`, `pipx` or `uv`.
 ### X / Twitter (delegated to magpie)
 
 ```bash
-tx x search "Claude Code" --max 5
-tx x home --json | jq -r '.[].text'
-tx x archive                            # sync bookmarks to ~/.tx/bookmarks.db
-tx x download --tweet-url <url>         # max-quality video + orig images
-tx x cookies-save                       # extract X cookies once
-tx x auth                               # 3-backend health check
+macli x search "Claude Code" --max 5
+macli x home --json | jq -r '.[].text'
+macli x archive                            # sync bookmarks to ~/.tx/bookmarks.db
+macli x download --tweet-url <url>         # max-quality video + orig images
+macli x cookies-save                       # extract X cookies once
+macli x auth                               # 3-backend health check
 ```
 
-Everything `magpie` supports works under `tx x ...`. See `vendor/magpie/README.md`.
+Everything magpie's X router supports works under `macli x ...` — the routing logic was inlined into `macli` in v0.2 (see Changelog).
 
 ### WeChat
 
 ```bash
-tx wx send <contact> "<text>"           # send text
-tx wx send <contact> <path-to-file>     # send file (auto-detects)
-tx wx read <contact> --limit 10         # fetch recent messages (JSON)
+macli wx send <contact> "<text>"           # send text
+macli wx send <contact> <path-to-file>     # send file (auto-detects)
+macli wx read <contact> --limit 10         # fetch recent messages (JSON)
 ```
 
 WeChat for macOS must be running and logged in. macOS Accessibility permission must be granted to your terminal (`System Settings → Privacy & Security → Accessibility`).
@@ -103,17 +103,17 @@ WeChat for macOS must be running and logged in. macOS Accessibility permission m
 
 ```bash
 # 1. Inline AppleScript
-tx mac script 'tell app "Music" to play'
-tx mac script 'return name of current user'
+macli mac script 'tell app "Music" to play'
+macli mac script 'return name of current user'
 
 # 2. Curated KB (492 pre-made scripts)
-tx mac kb-list                          # show all available script ids
-tx mac kb safari_get_front_tab_url      # run a KB script
-tx mac kb mailmaster_move_emails 已删除 收件箱 "login to X" ""
+macli mac kb-list                          # show all available script ids
+macli mac kb safari_get_front_tab_url      # run a KB script
+macli mac kb mailmaster_move_emails 已删除 收件箱 "login to X" ""
 
 # 3. Built-in shortcuts
-tx mac dark-mode <on|off|toggle>
-tx mac volume [0-100]                   # without arg = read current
+macli mac dark-mode <on|off|toggle>
+macli mac volume [0-100]                   # without arg = read current
 ```
 
 ---
@@ -121,7 +121,7 @@ tx mac volume [0-100]                   # without arg = read current
 ## Where data lives
 
 ```
-~/.tx/                          # magpie's data (created by tx x ...)
+~/.tx/                          # magpie's data (created by macli x ...)
 ├── cache.json                  # X command discovery cache
 ├── cookies.env                 # X auth (mode 0600)
 ├── bookmarks.db                # SQLite archive
@@ -135,7 +135,7 @@ Nothing leaves your machine.
 ## Doctor
 
 ```bash
-tx doctor
+macli doctor
 ```
 
 Verifies all 6 vendored backends + 3 external CLIs (`bird`, `twitter`, `opencli`) are properly set up.
@@ -151,20 +151,20 @@ MIT. Each vendored project retains its original LICENSE:
 - `vendor/macos-automator-mcp/LICENSE` (MIT)
 - `vendor/twitter-cli/LICENSE` (MIT)
 - `vendor/wechat-mcp/LICENSE` (MIT)
-- `vendor/magpie/LICENSE` (MIT)
+- `LICENSES/magpie-MIT.txt` (MIT — original magpie attribution, absorbed in v0.2)
 
 ---
 
 ## Changelog
 
 ### v0.2 — magpie absorbed
-- The X routing logic (formerly `vendor/magpie/tx`) is now **inlined** into top-level `tx`. magpie repository is no longer a vendored runtime layer.
-- `tx x ...` calls the absorbed code directly; one less Python process per X command (~50ms saved).
+- The X routing logic (formerly `vendor/magpie/tx`) is now **inlined** into top-level `macli`. magpie repository is no longer a vendored runtime layer.
+- `macli x ...` calls the absorbed code directly; one less Python process per X command (~50ms saved).
 - `LICENSES/magpie-MIT.txt` preserves the original copyright attribution.
-- Backward compat: legacy `tx search "..."` style commands still work (auto-routed to X subsystem).
+- Backward compat: legacy `macli search "..."` style commands still work (auto-routed to X subsystem).
 
 ### v0.1 — initial release
-- Three namespaces: `tx x` (X/Twitter), `tx wx` (WeChat), `tx mac` (macOS).
+- Three namespaces: `macli x` (X/Twitter), `macli wx` (WeChat), `macli mac` (macOS).
 - All upstream deps vendored for offline reproducibility.
 - bird preserved from npm package (upstream GitHub deleted).
 - wechat-mcp includes local patches for current WeChat UI.

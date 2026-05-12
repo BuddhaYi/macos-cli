@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""tx — macos-cli unified router.
+"""macli — macos-cli unified router.
 
 Three top-level namespaces, all dispatched from this single file:
 
-  tx x  <cmd> [args...]     X/Twitter ops (twitter-cli + bird + opencli)
-  tx wx <cmd> [args...]     WeChat ops (vendor/wechat-mcp, locally patched)
-  tx mac <cmd> [args...]    macOS apps + system (osascript + 492 KB scripts)
+  macli x  <cmd> [args...]     X/Twitter ops (twitter-cli + bird + opencli)
+  macli wx <cmd> [args...]     WeChat ops (vendor/wechat-mcp, locally patched)
+  macli mac <cmd> [args...]    macOS apps + system (osascript + 492 KB scripts)
 
 Plus a legacy passthrough: any unrecognized first token routes to the X
-subsystem so old magpie users can keep typing `tx search "..."` directly.
+subsystem so old magpie users can keep typing `macli search "..."` directly.
 
 Architecture: single 1200-LOC Python file. No pip dependencies. WeChat ops
 delegate to vendor/wechat-mcp's venv Python (pyobjc requirement).
@@ -90,7 +90,7 @@ def exec_or_fail(prog, args):
             "twitter": "uv tool install twitter-cli",
             "opencli": "npm i -g @jackwener/opencli",
         }.get(prog, "")
-        print(f"tx: {prog} not installed{'   →   ' + hint if hint else ''}",
+        print(f"macli: {prog} not installed{'   →   ' + hint if hint else ''}",
               file=sys.stderr)
         sys.exit(127)
     os.execvp(prog, [prog] + args)
@@ -315,7 +315,7 @@ def cmd_x_cookies_save(rest, cache):
     if "--check-age" in rest:
         age, source, label = _cookies_status()
         if age is None:
-            print("no cookies file — run `tx x cookies-save` to create one")
+            print("no cookies file — run `macli x cookies-save` to create one")
             return 1
         days = age / 86400
         print(f"source: {source}\nage:    {days:.1f} days\nstatus: {label}")
@@ -325,7 +325,7 @@ def cmd_x_cookies_save(rest, cache):
     if "--from" in rest:
         i = rest.index("--from")
         if i + 1 >= len(rest):
-            print("tx x cookies-save: --from requires a value", file=sys.stderr)
+            print("macli x cookies-save: --from requires a value", file=sys.stderr)
             return 2
         browser = rest[i + 1]
 
@@ -342,7 +342,7 @@ def cmd_x_cookies_save(rest, cache):
         "firefox":     (common_opts,                                              "firefoxSqlite.js",       "Firefox"),
     }
     if browser not in profiles:
-        print(f"tx x cookies-save: unknown browser '{browser}'", file=sys.stderr)
+        print(f"macli x cookies-save: unknown browser '{browser}'", file=sys.stderr)
         return 2
     if browser == "edge" and not EDGE_PROFILE_DIR.exists():
         print(f"Edge Beta profile not found: {EDGE_PROFILE_DIR}", file=sys.stderr)
@@ -485,8 +485,8 @@ def cmd_x_download(rest, cache):
     """Download media (videos/images) from tweets via twitter-cli + curl.
 
     Usage:
-      tx x download <username> [--limit N] [--output DIR]
-      tx x download --tweet-url <url>     | --tweet-id <id>
+      macli x download <username> [--limit N] [--output DIR]
+      macli x download --tweet-url <url>     | --tweet-id <id>
     """
     tweet_id, username, limit = None, None, 10
     output_dir = Path("./twitter-downloads")
@@ -497,7 +497,7 @@ def cmd_x_download(rest, cache):
         if a == "--tweet-url" and i + 1 < len(rest):
             m = _TWEET_ID_RE.search(rest[i + 1])
             if not m:
-                print(f"tx x download: cannot parse tweet ID from URL: {rest[i + 1]}", file=sys.stderr)
+                print(f"macli x download: cannot parse tweet ID from URL: {rest[i + 1]}", file=sys.stderr)
                 return 2
             tweet_id = m.group(1); i += 2
         elif a == "--tweet-id" and i + 1 < len(rest):
@@ -507,18 +507,18 @@ def cmd_x_download(rest, cache):
         elif a in ("--output", "-o") and i + 1 < len(rest):
             output_dir = Path(rest[i + 1]).expanduser(); i += 2
         elif a.startswith("-"):
-            print(f"tx x download: unknown flag: {a}", file=sys.stderr); return 2
+            print(f"macli x download: unknown flag: {a}", file=sys.stderr); return 2
         elif username is None and tweet_id is None:
             username = a.lstrip("@"); i += 1
         else:
-            print(f"tx x download: unexpected arg: {a}", file=sys.stderr); return 2
+            print(f"macli x download: unexpected arg: {a}", file=sys.stderr); return 2
 
     if not tweet_id and not username:
         print(cmd_x_download.__doc__, file=sys.stderr); return 2
     if not shutil.which("twitter"):
-        print("tx x download: twitter-cli not installed", file=sys.stderr); return 1
+        print("macli x download: twitter-cli not installed", file=sys.stderr); return 1
     if not shutil.which("curl"):
-        print("tx x download: curl not found", file=sys.stderr); return 1
+        print("macli x download: curl not found", file=sys.stderr); return 1
 
     _load_cookies_env()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -624,11 +624,11 @@ def cmd_x_archive(rest, cache):
         if r and _is_auth_error(err):
             age, source, _ = _cookies_status()
             if age is None:
-                print("\n  → cookies missing. run: tx x cookies-save", file=sys.stderr)
+                print("\n  → cookies missing. run: macli x cookies-save", file=sys.stderr)
             else:
                 print(f"\n  → cookies likely expired ({age/86400:.0f}d old, from {source}).", file=sys.stderr)
                 print("    1) Open Edge Beta → x.com → make sure logged in", file=sys.stderr)
-                print("    2) Run: tx x cookies-save", file=sys.stderr)
+                print("    2) Run: macli x cookies-save", file=sys.stderr)
         return 1
 
     try:
@@ -663,7 +663,7 @@ def cmd_x_archive(rest, cache):
 # ---- X auth + help ----------------------------------------------------------
 
 def cmd_x_auth(rest, cache):
-    print("=== tx x auth check ===\n")
+    print("=== macli x auth check ===\n")
     print("[bird]")
     if shutil.which("bird"):
         r = _run(["bird", "check"])
@@ -695,7 +695,7 @@ def cmd_x_auth(rest, cache):
     print("\n[saved cookies]")
     age, source, label = _cookies_status()
     if age is None:
-        print("  ⚠️  no ~/.tx/cookies.env — run: tx x cookies-save")
+        print("  ⚠️  no ~/.tx/cookies.env — run: macli x cookies-save")
     else:
         icon = {"fresh": "✅", "aging": "🟡", "stale (renew soon)": "🟠",
                 "expired (renew NOW)": "🔴"}.get(label, "❓")
@@ -728,7 +728,7 @@ def cmd_x_help(rest, cache):
     oc_only = sorted(oc - bird - tw - INTERNAL_OVERRIDES)
     tw_wins = sorted((bird & tw) | (tw & oc) | (bird & tw & oc))
 
-    print(f"tx x  —  X/Twitter subsystem (priority: twitter-cli > bird > opencli)")
+    print(f"macli x  —  X/Twitter subsystem (priority: twitter-cli > bird > opencli)")
     print()
     print(f"twitter-cli ({len(tw)} cmds, TLS impersonation):")
     if tw_wins:  print(f"  overlap (wins): {' '.join(tw_wins)}")
@@ -736,11 +736,11 @@ def cmd_x_help(rest, cache):
     print(f"bird-only ({len(bird_only)}, fallback): {' '.join(bird_only)}")
     print(f"opencli-only ({len(oc_only)}, browser): {' '.join(oc_only)}")
     print(f"\nINTERNAL")
-    print("  tx x auth          | archive | download | cookies-save | help <cmd>")
+    print("  macli x auth          | archive | download | cookies-save | help <cmd>")
     print(f"\nESCAPES")
-    print("  tx x bird <args>           force bird")
-    print("  tx x twitter-cli <args>    force twitter-cli")
-    print("  tx x <site> <args>         force opencli <site>")
+    print("  macli x bird <args>           force bird")
+    print("  macli x twitter-cli <args>    force twitter-cli")
+    print("  macli x <site> <args>         force opencli <site>")
     print(f"\nSITE ADAPTERS ({len(sites)})")
     cols = 6
     for i in range(0, len(sites), cols):
@@ -769,10 +769,10 @@ def route_x(argv):
             refresh = True; i += 1; continue
         if a == "--via":
             if i + 1 >= len(argv):
-                print("tx x: --via requires bird|twitter-cli|opencli", file=sys.stderr); return 2
+                print("macli x: --via requires bird|twitter-cli|opencli", file=sys.stderr); return 2
             via = argv[i + 1]
             if via not in ("bird", "twitter-cli", "twitter_cli", "opencli"):
-                print(f"tx x: --via must be bird|twitter-cli|opencli, got: {via}", file=sys.stderr); return 2
+                print(f"macli x: --via must be bird|twitter-cli|opencli, got: {via}", file=sys.stderr); return 2
             i += 2; continue
         argv = argv[i:]; break
     else:
@@ -840,9 +840,9 @@ def route_x(argv):
 
     # Unknown
     all_cmds = bird_cmds | oc_cmds | sites | X_INTERNAL | {"bird"}
-    print(f"tx x: unknown command: {cmd}", file=sys.stderr)
+    print(f"macli x: unknown command: {cmd}", file=sys.stderr)
     suggest_similar(cmd, all_cmds)
-    print("  try: tx x help", file=sys.stderr)
+    print("  try: macli x help", file=sys.stderr)
     return 2
 
 
@@ -862,7 +862,7 @@ def _wechat_python():
     for p in candidates:
         if p.is_file() and os.access(p, os.X_OK):
             return p
-    print("tx wx: no wechat-mcp venv found. run ./install.sh first.\n"
+    print("macli wx: no wechat-mcp venv found. run ./install.sh first.\n"
           f"  expected: {candidates[0]}\n"
           f"  or fallback: {candidates[1]}", file=sys.stderr)
     sys.exit(1)
@@ -878,7 +878,7 @@ def _run_wechat_helper(script):
 
 def cmd_wx_send(args):
     if len(args) < 2:
-        print("usage: tx wx send <contact> <text-or-file-path>", file=sys.stderr)
+        print("usage: macli wx send <contact> <text-or-file-path>", file=sys.stderr)
         return 2
     contact, payload = args[0], args[1]
     payload_path = Path(payload)
@@ -901,7 +901,7 @@ print("clip_ok")
 """
     r = _run_wechat_helper(stage)
     if "clip_ok" not in r.stdout:
-        print("tx wx: failed to stage clipboard", file=sys.stderr); return 1
+        print("macli wx: failed to stage clipboard", file=sys.stderr); return 1
 
     nav = f"""
 import sys, json
@@ -912,7 +912,7 @@ print(json.dumps(res, default=str))
 """
     r = _run_wechat_helper(nav)
     if "nav_done" not in r.stdout:
-        print(f"tx wx: could not navigate to '{contact}'", file=sys.stderr); return 1
+        print(f"macli wx: could not navigate to '{contact}'", file=sys.stderr); return 1
     time.sleep(0.4)
 
     osascript('''
@@ -929,7 +929,7 @@ print(json.dumps(res, default=str))
 
 def cmd_wx_read(args):
     if not args:
-        print("usage: tx wx read <contact> [--limit N]", file=sys.stderr); return 2
+        print("usage: macli wx read <contact> [--limit N]", file=sys.stderr); return 2
     contact = args[0]; limit = 10
     if "--limit" in args:
         i = args.index("--limit")
@@ -949,11 +949,11 @@ print(json.dumps(msgs, indent=2, ensure_ascii=False, default=str))
 
 def route_wechat(args):
     if not args:
-        print("usage: tx wx <send|read> [args...]", file=sys.stderr); return 2
+        print("usage: macli wx <send|read> [args...]", file=sys.stderr); return 2
     sub, rest = args[0], args[1:]
     if sub == "send": return cmd_wx_send(rest)
     if sub == "read": return cmd_wx_read(rest)
-    print(f"tx wx: unknown subcommand '{sub}'", file=sys.stderr); return 2
+    print(f"macli wx: unknown subcommand '{sub}'", file=sys.stderr); return 2
 
 
 # =============================================================================
@@ -988,14 +988,14 @@ def _kb_extract_script(md_path):
 
 def cmd_mac_kb(args):
     if not args:
-        print("usage: tx mac kb <script-id> [arg1 ...]", file=sys.stderr); return 2
+        print("usage: macli mac kb <script-id> [arg1 ...]", file=sys.stderr); return 2
     script_id, script_args = args[0], args[1:]
     idx = _kb_index()
     if script_id not in idx:
-        print(f"tx mac kb: id '{script_id}' not found", file=sys.stderr); return 1
+        print(f"macli mac kb: id '{script_id}' not found", file=sys.stderr); return 1
     script, lang = _kb_extract_script(idx[script_id])
     if script is None:
-        print(f"tx mac kb: no code block in {idx[script_id]}", file=sys.stderr); return 1
+        print(f"macli mac kb: no code block in {idx[script_id]}", file=sys.stderr); return 1
     for i, val in enumerate(script_args, 1):
         script = script.replace(f"--MCP_ARG_{i}", val)
     cmd = ["osascript"] + (["-l", "JavaScript"] if lang.lower() in ("javascript", "jxa") else []) + ["-e", script]
@@ -1015,7 +1015,7 @@ def cmd_mac_kb_list(args):
 
 def cmd_mac_script(args):
     if not args:
-        print("usage: tx mac script '<applescript code>'", file=sys.stderr); return 2
+        print("usage: macli mac script '<applescript code>'", file=sys.stderr); return 2
     r = osascript(args[0], timeout=60)
     sys.stdout.write(r.stdout); sys.stderr.write(r.stderr)
     return r.returncode
@@ -1023,7 +1023,7 @@ def cmd_mac_script(args):
 
 def cmd_mac_dark_mode(args):
     if not args or args[0] not in ("on", "off", "toggle"):
-        print("usage: tx mac dark-mode <on|off|toggle>", file=sys.stderr); return 2
+        print("usage: macli mac dark-mode <on|off|toggle>", file=sys.stderr); return 2
     state = args[0]
     if state == "toggle":
         script = 'tell app "System Events" to tell appearance preferences to set dark mode to not dark mode'
@@ -1043,7 +1043,7 @@ def cmd_mac_volume(args):
         print(r.stdout.strip()); return 0
     try: vol = int(args[0])
     except ValueError:
-        print("usage: tx mac volume <0-100>", file=sys.stderr); return 2
+        print("usage: macli mac volume <0-100>", file=sys.stderr); return 2
     osascript(f'set volume output volume {vol}')
     print(f"✓ volume = {vol}")
     return 0
@@ -1051,14 +1051,14 @@ def cmd_mac_volume(args):
 
 def route_mac(args):
     if not args:
-        print("usage: tx mac <kb|kb-list|script|dark-mode|volume>", file=sys.stderr); return 2
+        print("usage: macli mac <kb|kb-list|script|dark-mode|volume>", file=sys.stderr); return 2
     sub, rest = args[0], args[1:]
     if sub == "kb":         return cmd_mac_kb(rest)
     if sub == "kb-list":    return cmd_mac_kb_list(rest)
     if sub == "script":     return cmd_mac_script(rest)
     if sub == "dark-mode":  return cmd_mac_dark_mode(rest)
     if sub == "volume":     return cmd_mac_volume(rest)
-    print(f"tx mac: unknown subcommand '{sub}'", file=sys.stderr); return 2
+    print(f"macli mac: unknown subcommand '{sub}'", file=sys.stderr); return 2
 
 
 # =============================================================================
@@ -1092,38 +1092,38 @@ def cmd_doctor(args):
 
 
 def cmd_help(args):
-    print(f"""tx {VERSION}  —  macos-cli unified router
+    print(f"""macli {VERSION}  —  macos-cli unified router
 
 USAGE
-  tx <namespace> <action> [args...]
-  tx <legacy-x-cmd> [args...]                  # auto-routed to x subsystem
+  macli <namespace> <action> [args...]
+  macli <legacy-x-cmd> [args...]                  # auto-routed to x subsystem
 
 NAMESPACES
-  tx x  <args>          X/Twitter (twitter-cli + bird + opencli)
-                        e.g. tx x search "Claude Code"
-                             tx x archive
-                             tx x download --tweet-url <url>
-                             tx x post "hello"
-  tx wx send <contact> <text|file>
-  tx wx read <contact> [--limit N]
-  tx mac script '<applescript>'
-  tx mac kb <script-id> [args...]
-  tx mac kb-list                              # list 492 KB scripts
-  tx mac dark-mode <on|off|toggle>
-  tx mac volume [0-100]
+  macli x  <args>          X/Twitter (twitter-cli + bird + opencli)
+                        e.g. macli x search "Claude Code"
+                             macli x archive
+                             macli x download --tweet-url <url>
+                             macli x post "hello"
+  macli wx send <contact> <text|file>
+  macli wx read <contact> [--limit N]
+  macli mac script '<applescript>'
+  macli mac kb <script-id> [args...]
+  macli mac kb-list                              # list 492 KB scripts
+  macli mac dark-mode <on|off|toggle>
+  macli mac volume [0-100]
 
 INTERNAL
-  tx doctor             diagnose all backends
-  tx --version
-  tx --help / -h
+  macli doctor             diagnose all backends
+  macli --version
+  macli --help / -h
 
 EXAMPLES
-  tx x search "Claude Code"
-  tx x archive                                # bookmarks → ~/.tx/bookmarks.db
-  tx wx send 老婆 "下班来接"
-  tx wx send 老婆 ~/Downloads/合同.pdf
-  tx mac dark-mode on
-  tx mac kb safari_save_as_pdf ~/x.pdf
+  macli x search "Claude Code"
+  macli x archive                                # bookmarks → ~/.tx/bookmarks.db
+  macli wx send 老婆 "下班来接"
+  macli wx send 老婆 ~/Downloads/合同.pdf
+  macli mac dark-mode on
+  macli mac kb safari_save_as_pdf ~/x.pdf
 """)
     return 0
 

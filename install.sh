@@ -38,7 +38,7 @@ echo "==> 3. macos-automator-mcp (knowledge base + dist)"
 cd "$VENDOR/macos-automator-mcp"
 npm install --silent
 npm run build 2>/dev/null || true
-# we don't need its CLI binary; tx reads the KB directly
+# we don't need its CLI binary; macli reads the KB directly
 
 echo "==> 4. twitter-cli (editable install)"
 $PYE "$VENDOR/twitter-cli"
@@ -47,13 +47,13 @@ echo "==> 5. wechat-mcp (editable install — preserves your local patches)"
 $PYE "$VENDOR/wechat-mcp"
 
 echo "==> 6. macos-cli main entry (X subsystem absorbed from magpie)"
-chmod +x "$SCRIPT_DIR/tx"
-ln -sf "$SCRIPT_DIR/tx" "$target/tx"
+chmod +x "$SCRIPT_DIR/macli"
+ln -sf "$SCRIPT_DIR/macli" "$target/macli"
 
 echo ""
-echo "✓ installed: $target/tx → $SCRIPT_DIR/tx"
+echo "✓ installed: $target/macli → $SCRIPT_DIR/macli"
 echo ""
 echo "next:"
-echo "  tx doctor          # check all backends"
-echo "  tx --help          # see all commands"
-echo "  tx x cookies-save  # one-time WeChat-like auth for X"
+echo "  macli doctor          # check all backends"
+echo "  macli --help          # see all commands"
+echo "  macli x cookies-save  # one-time WeChat-like auth for X"

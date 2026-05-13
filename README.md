@@ -62,7 +62,7 @@ See `vendor/UPSTREAM_PINS.md` for exact commit each was vendored from.
 ## Install
 
 ```bash
-git clone https://github.com/<you>/macos-cli.git
+git clone https://github.com/BuddhaYi/macos-cli.git
 cd macos-cli
 ./install.sh
 ```
@@ -78,7 +78,7 @@ Requires: macOS, Python ≥ 3.10, Node ≥ 18, `npm`, `pipx` or `uv`.
 
 ## Usage
 
-### X / Twitter (delegated to magpie)
+### X / Twitter
 
 ```bash
 macli x search "Claude Code" --max 5
@@ -94,10 +94,15 @@ Everything magpie's X router supports works under `macli x ...` — the routing 
 ### WeChat
 
 ```bash
-macli wx send <contact> "<text>"           # send text
+macli wx send <contact> "<text>"           # send text (verified by default — see below)
 macli wx send <contact> <path-to-file>     # send file (auto-detects)
+macli wx send <contact> "..." --no-verify  # fire-and-forget (batch ops)
+macli wx send <contact> "..." --retry 3    # retry transient failures up to N times
 macli wx read <contact> --limit 10         # fetch recent messages (JSON)
+macli wx contacts [filter]                 # list known contacts (substring filter)
 ```
+
+`wx send` is **not fire-and-forget**: after Cmd+V+Enter it polls WeChat's AX tree for failure markers (`重发` / `被对方拒收` / `拉黑` / `retry` / `send failed`). Permanent failures (block / 拒收) are detected and **not retried** (no chat spam). Every invocation appends one NDJSON line to `~/.tx/wx_send.log`; non-TTY failures fire a macOS desktop notification.
 
 WeChat for macOS must be running and logged in. macOS Accessibility permission must be granted to your terminal (`System Settings → Privacy & Security → Accessibility`).
 
@@ -108,26 +113,31 @@ WeChat for macOS must be running and logged in. macOS Accessibility permission m
 macli mac script 'tell app "Music" to play'
 macli mac script 'return name of current user'
 
-# 2. Curated KB (492 pre-made scripts)
-macli mac kb-list                          # show all available script ids
-macli mac kb safari_get_front_tab_url      # run a KB script
-macli mac kb mailmaster_move_emails 已删除 收件箱 "login to X" ""
+# 2. Curated KB (492 pre-made scripts) — discover by intent, not by name
+macli mac kb-search "save webpage as PDF"            # ranked fuzzy keyword search
+macli mac kb-search "音量 volume" --max 3 --json
+macli mac kb safari_save_as_pdf ~/page.pdf           # run a KB script by id
+macli mac kb-list                                    # full alphabetical id list (492)
 
 # 3. Built-in shortcuts
 macli mac dark-mode <on|off|toggle>
-macli mac volume [0-100]                   # without arg = read current
+macli mac volume [0-100]                             # without arg = read current
 ```
+
+Prefer `kb-search` over `kb-list` — it returns ranked results with description + keywords so an agent can decide what to run without a second fetch.
 
 ---
 
 ## Where data lives
 
 ```
-~/.tx/                          # magpie's data (created by macli x ...)
+~/.tx/                          # data dir (kept as .tx for magpie-era backward compat)
 ├── cache.json                  # X command discovery cache
 ├── cookies.env                 # X auth (mode 0600)
-├── bookmarks.db                # SQLite archive
-└── archive.log                 # launchd output
+├── bookmarks.db                # SQLite archive (macli x archive)
+├── archive.log                 # launchd cron output
+├── wx_send.log                 # NDJSON audit of every macli wx send (success+failure)
+└── kb-search-index.json        # lazy-built KB search index (auto-rebuilds on KB change)
 ```
 
 Nothing leaves your machine.
@@ -137,10 +147,13 @@ Nothing leaves your machine.
 ## Doctor
 
 ```bash
-macli doctor
+macli doctor                  # diagnose vendor backends + external CLIs + cookies + KB
+macli doctor --json           # machine-readable envelope (for agents)
+macli doctor --fix            # auto-repair missing pieces (npm link / pipx / venv rebuild)
+macli doctor --fix --json     # both
 ```
 
-Verifies all 6 vendored backends + 3 external CLIs (`bird`, `twitter`, `opencli`) are properly set up.
+`--fix` is targeted: `npm link` for bird/opencli/macos-automator-mcp, `pipx install -e` for twitter-cli, and a real Python ≥3.12 venv at `vendor/wechat-mcp/.venv/` (auto-detects `python3.13` / `python3.12`). Broken half-built venvs are rebuilt from scratch.
 
 ---
 

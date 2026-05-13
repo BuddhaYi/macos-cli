@@ -144,6 +144,269 @@ def _emit_err(code, message, data=None):
     _print_json(_envelope(False, data=data, error_code=code, error_message=message))
 
 
+# =============================================================================
+# Self-describing CLI registry — feeds every `macli help ... --json` endpoint.
+# Static data so agents can discover capability without running the command.
+# =============================================================================
+
+NAMESPACES = ["x", "wx", "mac"]
+INTERNAL_COMMANDS = ["doctor", "stats", "help"]
+
+WX_SUBCOMMANDS = ["send", "read", "contacts"]
+MAC_SUBCOMMANDS = ["kb", "kb-list", "kb-search", "script", "dark-mode", "volume"]
+X_INTERNAL_SUBCOMMANDS = sorted(X_INTERNAL)  # auth, archive, cookies-save, doctor, download, help
+
+DISCOVERY_COMMANDS = [
+    "macli help --json                                # top-level: namespaces + version + index",
+    "macli <ns> --json                                # list a namespace's subcommands (ns ∈ x|wx|mac)",
+    "macli help <cmd-path> [--json]                   # per-command synopsis + flags + behavior + samples",
+    "macli help errors [--json]                       # full error-code inventory",
+    "macli help schema [--json]                       # JSON envelope contract",
+    "macli mac kb-list --json                         # all 492 KB script ids",
+    "macli mac kb-search '<intent>' [--max N] --json  # find a KB script by intent (ranked)",
+    "macli x help --json                              # X subsystem command matrix (twitter-cli/bird/opencli/sites)",
+    "macli doctor --json                              # backend health: vendors + external tools + cookies + cache",
+]
+
+# Standard machine-classifiable error codes the envelope `error.code` may carry.
+ERROR_CODES = {
+    "invalid_args":             "Caller passed bad / missing positional args or flag values.",
+    "not_found":                "Target (contact, tweet, kb script id, file) does not exist.",
+    "not_authenticated":        "Cookies missing / expired (X subsystem).",
+    "auth_check_failed":        "Cookies present but rejected by upstream.",
+    "vendor_missing":           "vendor/* path not set up — run ./install.sh or `macli doctor --fix`.",
+    "subprocess_failed":        "Underlying tool (osascript / bird / twitter-cli / opencli / wechat-mcp) exited non-zero.",
+    "timeout":                  "Operation exceeded internal timeout.",
+    "permission_denied":        "macOS Accessibility / Full Disk Access / Keychain blocked the call.",
+    "send_failed":              "WeChat surfaced a generic failure marker on the last message (transient).",
+    "send_failed_at_recipient": "Recipient rejected (block / 拒收 / account deleted). Non-retriable.",
+    "verify_timeout":           "wx send verification deadline reached without confirmation.",
+    "verify_error":             "wx send verification could not run (AX tree unavailable).",
+    "internal_error":           "Uncategorized internal failure — see stderr.",
+}
+
+# Per-command metadata for `macli help <cmd> --json`.
+# Keep entries SLIM: synopsis already lists flags; only call out non-obvious
+# behavior the agent must know (the contracts that don't show up in --help text).
+CMD_INFO = {
+    # ---- INTERNAL ----
+    "doctor": {
+        "synopsis": "macli doctor [--fix] [--json]",
+        "summary": "Diagnose all vendored backends + cookies + KB; --fix auto-repairs missing pieces.",
+        "behavior": [
+            "--fix runs npm link / pipx install -e / vendor/wechat-mcp/.venv rebuild as needed",
+            "wechat-mcp venv requires Python ≥3.12; auto-detects python3.13/3.12/python3",
+            "Returns vendors{}, external_tools{}, cookies{}, x_cache{}, kb_count, and (with --fix) repairs[]",
+        ],
+        "see_also": ["stats", "help"],
+    },
+    "stats": {
+        "synopsis": "macli stats [--json]",
+        "summary": "Local-only usage statistics. No telemetry leaves the machine.",
+        "behavior": [
+            "Reads ~/.tx/bookmarks.db, ~/.tx/cookies.env, ~/.tx/kb-search-index.json, ~/.tx/archive.log",
+            "Sections: bookmarks / cookies / kb / archive_log / data_dir",
+        ],
+        "see_also": ["doctor"],
+    },
+    "help": {
+        "synopsis": "macli help [<cmd-path> | errors | schema] [--json]",
+        "summary": "Self-describing CLI metadata for agent discovery.",
+        "behavior": [
+            "`macli help --json` → top-level overview (namespaces, discovery_commands)",
+            "`macli help <cmd> --json` → per-command synopsis + behavior contracts",
+            "`macli help errors --json` → ERROR_CODES inventory",
+            "`macli help schema --json` → JSON envelope contract",
+        ],
+    },
+    # ---- WX ----
+    "wx send": {
+        "synopsis": "macli wx send <contact> <text-or-file-path> [--retry N] [--no-verify] [--verify-timeout S] [--json]",
+        "summary": "Send text or file to a WeChat contact. Verified by default.",
+        "behavior": [
+            "Auto-detects file vs text via Path.is_file()",
+            "Verifies via AX poll for failure markers (重发 / 被对方拒收 / 拉黑 / retry / send failed)",
+            "Permanent failures (拒收 / 拉黑) classified non-retriable — won't burn --retry attempts",
+            "Default verify timeout: 6s text, 30s file (override with --verify-timeout)",
+            "Appends one NDJSON line per call to ~/.tx/wx_send.log (success+failure)",
+            "Non-TTY failure fires macOS desktop notification (cron/agent safe)",
+        ],
+        "see_also": ["wx read", "wx contacts"],
+    },
+    "wx read": {
+        "synopsis": "macli wx read <contact> [--limit N] [--json]",
+        "summary": "Fetch recent messages from a WeChat contact (default 10).",
+        "behavior": [
+            "Opens chat first via open_chat_for_contact, then calls fetch_recent_messages",
+            "Senders classified ME / OTHER / UNKNOWN via screenshot heuristic",
+        ],
+        "see_also": ["wx send", "wx contacts"],
+    },
+    "wx contacts": {
+        "synopsis": "macli wx contacts [filter-substring] [--json]",
+        "summary": "List WeChat contacts via collect_chat_elements (sidebar enumeration).",
+        "behavior": [
+            "Returns full sidebar history on WeChat 4.x (typically 100s of entries)",
+            "Optional substring filter is case-insensitive",
+        ],
+        "see_also": ["wx send", "wx read"],
+    },
+    # ---- MAC ----
+    "mac kb": {
+        "synopsis": "macli mac kb <script-id> [arg1 arg2 ...] [--json]",
+        "summary": "Execute a KB AppleScript/JXA snippet by id.",
+        "behavior": [
+            "Replaces --MCP_ARG_1, --MCP_ARG_2 ... placeholders in the script with passed args",
+            "Auto-detects language from frontmatter; routes JS/JXA via `osascript -l JavaScript`",
+            "Exit code mirrors osascript",
+        ],
+        "see_also": ["mac kb-list", "mac kb-search", "mac script"],
+    },
+    "mac kb-list": {
+        "synopsis": "macli mac kb-list [--json]",
+        "summary": "List all 492 KB script ids in alphabetical order.",
+        "behavior": [
+            "Stable sort (diff-friendly across vendor upgrades)",
+            "For metadata-rich lookup, prefer `mac kb-search` instead",
+        ],
+        "see_also": ["mac kb", "mac kb-search"],
+    },
+    "mac kb-search": {
+        "synopsis": "macli mac kb-search <query> [--max N] [--json]",
+        "summary": "Fuzzy keyword search across KB titles + descriptions + keywords. Returns ranked.",
+        "behavior": [
+            "Lazy index at ~/.tx/kb-search-index.json (auto-rebuilds when any KB md changes)",
+            "Scoring: title×3 + keywords×2.5 + id×1.5 + description×1 + category×0.5",
+            "Results include description + keywords so agent can decide without follow-up fetch",
+        ],
+        "see_also": ["mac kb-list", "mac kb"],
+    },
+    "mac script": {
+        "synopsis": "macli mac script '<applescript code>' [--json]",
+        "summary": "Run an arbitrary AppleScript expression via osascript.",
+        "behavior": [
+            "60s timeout; stdout/stderr/exit_code returned in envelope when --json",
+        ],
+        "see_also": ["mac kb"],
+    },
+    "mac dark-mode": {
+        "synopsis": "macli mac dark-mode <on|off|toggle> [--json]",
+        "summary": "Set or toggle System Appearance dark mode.",
+        "behavior": [
+            "Reads current state after set for confirmation",
+        ],
+    },
+    "mac volume": {
+        "synopsis": "macli mac volume [0-100] [--json]",
+        "summary": "Get current output volume; with N argument, set to N.",
+        "behavior": [
+            "Without arg: read-only; envelope.data.changed=false",
+        ],
+    },
+    # ---- X (internal subset; other X commands pass through to upstream tools) ----
+    "x archive": {
+        "synopsis": "macli x archive [--json]",
+        "summary": "Sync bookmarks to SQLite (~/.tx/bookmarks.db) — incremental upsert.",
+        "behavior": [
+            "Prefers twitter-cli backend; falls back to bird",
+            "On auth failure, fires desktop notification (cron-friendly)",
+            "Returns backend / new_count / total_count / db_path on success",
+        ],
+        "see_also": ["x cookies-save", "stats"],
+    },
+    "x download": {
+        "synopsis": "macli x download --tweet-url <url> | --tweet-id <id> | <username> --limit N [--output DIR] [--json]",
+        "summary": "Download max-quality media from a tweet or recent user posts.",
+        "behavior": [
+            "Selects highest-bitrate video variant by default (config in ~/.tx/config.json)",
+            "Images get ?name=orig suffix for native resolution",
+        ],
+    },
+    "x cookies-save": {
+        "synopsis": "macli x cookies-save [--from edge|chrome|safari|firefox|edge-stable] [--check-age] [--json]",
+        "summary": "Extract X cookies from a browser via sweet-cookie; with --check-age only report freshness.",
+        "behavior": [
+            "Default source is Edge Beta (longest-lived cookies — no Safari ITP)",
+            "Writes ~/.tx/cookies.env (mode 0600); env vars AUTH_TOKEN + CT0 + TWITTER_* aliases",
+            "--check-age exit codes: 0=fresh, 2=stale/expired, 1=missing",
+        ],
+        "see_also": ["x auth", "x archive"],
+    },
+    "x auth": {
+        "synopsis": "macli x auth",
+        "summary": "Human-readable 3-backend health check (bird / twitter-cli / opencli + saved cookies).",
+        "behavior": [
+            "No --json yet — exits 0 regardless; read stderr for warnings",
+        ],
+        "see_also": ["x cookies-save", "doctor"],
+    },
+    "x doctor": {
+        "synopsis": "macli x doctor",
+        "summary": "Legacy alias for x auth; prefer top-level `macli doctor` for full backend picture.",
+        "see_also": ["doctor", "x auth"],
+    },
+    "x help": {
+        "synopsis": "macli x help [<sub>] [--json]",
+        "summary": "X subsystem command matrix (twitter-cli / bird / opencli / 136 sites).",
+        "behavior": [
+            "Without arg: lists which backend wins each command + all site adapters",
+            "With <sub>: execs into the upstream tool's --help",
+            "With --json (no sub): returns categorized command dict",
+        ],
+    },
+}
+
+
+def _has_help_flag(args):
+    """True if the args carry a --help / -h that should trigger per-cmd help."""
+    return "--help" in args or "-h" in args
+
+
+def _emit_subcommand_help(cmd_path, args):
+    """Resolve `macli <cmd-path> --help [--json]` to the registered CMD_INFO entry.
+
+    Returns the exit code (always 0 if found; 1 if not in registry).
+    """
+    as_json, _ = _pop_flag([a for a in args if a not in ("--help", "-h")], "--json")
+    info = CMD_INFO.get(cmd_path)
+    if not info:
+        msg = f"no registered help for: {cmd_path}  (try: macli help --json | jq .data.commands)"
+        if as_json:
+            _emit_err("not_found", msg, data={"available": sorted(CMD_INFO.keys())})
+        else:
+            print(msg, file=sys.stderr)
+        return 1
+    if as_json:
+        _emit_ok({"command": cmd_path, **info})
+        return 0
+    # Human format
+    print(f"# {cmd_path}")
+    print(f"  {info['synopsis']}\n")
+    print(f"  {info.get('summary','')}\n")
+    if info.get("behavior"):
+        print("  Behavior:")
+        for line in info["behavior"]:
+            print(f"    - {line}")
+        print()
+    if info.get("see_also"):
+        print(f"  See also: {', '.join(info['see_also'])}")
+    return 0
+
+
+def _emit_namespace_listing(ns, subcommands, args):
+    """Handle `macli <ns> [--json]` standalone (no subcommand)."""
+    as_json, _ = _pop_flag(args, "--json")
+    if as_json:
+        _emit_ok({
+            "namespace": ns,
+            "subcommands": subcommands,
+            "discover_per_command": f"macli help {ns} <subcommand> --json",
+        })
+        return 0
+    print(f"usage: macli {ns} <{'|'.join(subcommands)}> [args...]", file=sys.stderr)
+    return 2
+
+
 def suggest_similar(cmd, candidates):
     matches = difflib.get_close_matches(cmd, candidates, n=3, cutoff=0.6)
     if matches:
@@ -815,6 +1078,7 @@ def cmd_x_auth(rest, cache):
 
 
 def cmd_x_help(rest, cache):
+    as_json, rest = _pop_flag(rest, "--json")
     if rest:
         sub = rest[0]
         sites = set(cache["opencli_sites"])
@@ -838,6 +1102,23 @@ def cmd_x_help(rest, cache):
     bird_only = sorted(bird - tw - oc - {"tweet"})
     oc_only = sorted(oc - bird - tw - INTERNAL_OVERRIDES)
     tw_wins = sorted((bird & tw) | (tw & oc) | (bird & tw & oc))
+
+    # Tier 1: machine-readable X command matrix
+    if as_json:
+        _emit_ok({
+            "twitter_cli":      sorted(tw),
+            "bird":             sorted(bird),
+            "opencli_twitter":  sorted(oc),
+            "opencli_sites":    sites,
+            "internal":         X_INTERNAL_SUBCOMMANDS,
+            "priority":         "twitter-cli > bird > opencli",
+            "escape_hatches": {
+                "force_bird":        "macli x bird <args>",
+                "force_twitter_cli": "macli x twitter-cli <args>",
+                "force_opencli":     "macli x <site> <args>",
+            },
+        })
+        return 0
 
     print(f"macli x  —  X/Twitter subsystem (priority: twitter-cli > bird > opencli)")
     print()
@@ -863,6 +1144,18 @@ def cmd_x_help(rest, cache):
 
 def route_x(argv):
     """Handle all X commands. Called with ['x', ...] stripped — argv = the rest."""
+    # Tier 1: standalone `macli x --json` lists subcommands (synthetic — internal
+    # commands only, since the full upstream-tool surface is huge; agents that
+    # need the full matrix should call `macli x help --json` which uses cached
+    # backend probes).
+    if argv == ["--json"]:
+        _emit_ok({
+            "namespace": "x",
+            "subcommands": X_INTERNAL_SUBCOMMANDS,
+            "note": "Run `macli x help --json` for the full backend command matrix (twitter-cli / bird / opencli / 136 sites).",
+            "discover_per_command": "macli help x <subcommand> --json",
+        })
+        return 0
     # Peel global flags
     via, refresh = None, False
     i = 0
@@ -1500,9 +1793,16 @@ except Exception as e:
 
 
 def route_wechat(args):
-    if not args:
-        print("usage: macli wx <send|read|contacts> [args...]", file=sys.stderr); return 2
+    # Tier 1: standalone `macli wx [--json]` lists subcommands
+    if not args or args == ["--json"]:
+        return _emit_namespace_listing("wx", WX_SUBCOMMANDS, args)
     sub, rest = args[0], args[1:]
+    # Tier 3: --help intercept BEFORE dispatching to cmd_wx_*
+    if _has_help_flag(rest) or sub in ("--help", "-h", "help"):
+        target = sub if sub not in ("--help", "-h", "help") else (rest[0] if rest else None)
+        if target is None or target not in WX_SUBCOMMANDS:
+            return _emit_subcommand_help("wx send", rest)  # default to send help
+        return _emit_subcommand_help(f"wx {target}", rest)
     if sub == "send":     return cmd_wx_send(rest)
     if sub == "read":     return cmd_wx_read(rest)
     if sub == "contacts": return cmd_wx_contacts(rest)
@@ -1848,10 +2148,16 @@ def cmd_mac_volume(args):
 
 
 def route_mac(args):
-    if not args:
-        print("usage: macli mac <kb|kb-list|kb-search|script|dark-mode|volume>",
-              file=sys.stderr); return 2
+    # Tier 1: standalone `macli mac [--json]` lists subcommands
+    if not args or args == ["--json"]:
+        return _emit_namespace_listing("mac", MAC_SUBCOMMANDS, args)
     sub, rest = args[0], args[1:]
+    # Tier 3: --help intercept BEFORE dispatching to cmd_mac_*
+    if _has_help_flag(rest) or sub in ("--help", "-h", "help"):
+        target = sub if sub not in ("--help", "-h", "help") else (rest[0] if rest else None)
+        if target is None or target not in MAC_SUBCOMMANDS:
+            return _emit_subcommand_help("mac kb", rest)  # default to kb help
+        return _emit_subcommand_help(f"mac {target}", rest)
     if sub == "kb":         return cmd_mac_kb(rest)
     if sub == "kb-list":    return cmd_mac_kb_list(rest)
     if sub == "kb-search":  return cmd_mac_kb_search(rest)
@@ -2183,6 +2489,78 @@ def cmd_stats(args):
 
 
 def cmd_help(args):
+    as_json, args = _pop_flag(args, "--json")
+
+    # Tier 2: macli help errors [--json]
+    if args and args[0] == "errors":
+        if as_json:
+            _emit_ok({
+                "schema_version": SCHEMA_VERSION,
+                "error_codes": [
+                    {"code": c, "description": d} for c, d in ERROR_CODES.items()
+                ],
+            })
+            return 0
+        print("macli error codes (envelope.error.code values):\n")
+        for code, desc in ERROR_CODES.items():
+            print(f"  {code:30s}  {desc}")
+        return 0
+
+    # Tier 3: macli help schema [--json]
+    if args and args[0] == "schema":
+        envelope_doc = {
+            "schema_version": SCHEMA_VERSION,
+            "success_shape": {
+                "ok": True, "schema_version": SCHEMA_VERSION,
+                "data": "<command-specific payload (object or array)>",
+            },
+            "error_shape": {
+                "ok": False, "schema_version": SCHEMA_VERSION,
+                "error": {"code": "<one of error_codes>",
+                          "message": "<human-readable detail>"},
+                "data": "<optional command-specific context for the failure>",
+            },
+            "rules": [
+                "All --json output writes to stdout; logs/progress go to stderr",
+                "ok is always a bool; schema_version is always the string '1'",
+                "data may be present on either success OR failure (failure-with-context)",
+                "error is present only when ok=false",
+                "Streaming consumers can parse one envelope per stdout (no multi-doc concat)",
+            ],
+            "discover_codes": "macli help errors --json",
+        }
+        if as_json:
+            _emit_ok(envelope_doc)
+            return 0
+        print(f"# macli JSON envelope (schema_version='{SCHEMA_VERSION}')\n")
+        print("Success:")
+        print(json.dumps(envelope_doc["success_shape"], indent=2, ensure_ascii=False))
+        print("\nFailure:")
+        print(json.dumps(envelope_doc["error_shape"], indent=2, ensure_ascii=False))
+        print("\nRules:")
+        for r in envelope_doc["rules"]:
+            print(f"  - {r}")
+        return 0
+
+    # Tier 2: macli help <cmd-path> [--json] — per-command contract
+    if args:
+        cmd_path = " ".join(args)
+        return _emit_subcommand_help(cmd_path, ["--json"] if as_json else [])
+
+    # Tier 1: macli help [--json] — top-level overview
+    if as_json:
+        _emit_ok({
+            "version": VERSION,
+            "schema_version": SCHEMA_VERSION,
+            "namespaces": NAMESPACES,
+            "internal_commands": INTERNAL_COMMANDS,
+            "commands": sorted(CMD_INFO.keys()),
+            "discovery_commands": DISCOVERY_COMMANDS,
+            "data_dir": str(CACHE_DIR),
+        })
+        return 0
+
+    # Human-readable top-level help (unchanged)
     print(f"""macli {VERSION}  —  macos-cli unified router
 
 USAGE
@@ -2211,6 +2589,13 @@ INTERNAL
   macli --version
   macli --help / -h
 
+AGENT DISCOVERY (machine-readable)
+  macli help --json                                top-level overview + namespaces
+  macli <ns> --json                                list subcommands of namespace
+  macli help <cmd-path> --json                     per-command synopsis + behavior + samples
+  macli help errors --json                         error-code inventory
+  macli help schema --json                         JSON envelope contract
+
 EXAMPLES
   macli x search "Claude Code"
   macli x archive                                # bookmarks → ~/.tx/bookmarks.db
@@ -2227,6 +2612,9 @@ EXAMPLES
 def route(argv):
     if not argv or argv[0] in ("--help", "-h", "help"):
         return cmd_help(argv[1:] if argv else [])
+    # Top-level `macli --json` is an alias for `macli help --json`.
+    if argv == ["--json"]:
+        return cmd_help(["--json"])
     if argv[0] == "--version":
         print(VERSION); return 0
 

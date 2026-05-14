@@ -281,15 +281,19 @@ def _find_inner_chats_cell_view(row, max_depth: int = 4) -> Any:
     return None
 
 
-def _find_chats_table(ax_app, retries: int = 3) -> Any:
+def _find_chats_table(ax_app, retries: int = 8) -> Any:
     """
     Locate the AXTable that holds the WeChat 4.x conversation list. We
     identify it by looking for an AXTable whose subtree contains at least
     one descendant with `MMChatsTableCellView*` identifier.
 
-    Retries a few times with short sleeps because immediately after a
-    window activation the SwiftUI table sometimes appears before its rows
-    are populated, making a single-shot lookup miss the table.
+    Retries a few times with short sleeps because immediately after WeChat
+    is activated (especially from a hidden state) the SwiftUI table
+    sometimes appears in the AX tree before its rows are populated. Cold
+    starts on macOS 14+/Apple Silicon have been observed to need ~2-3
+    seconds before the conversation list is queryable. We retry in 0.4 s
+    increments up to ~3 s total, but only sleep when the first probe
+    misses, so warm calls remain instant.
     """
     for attempt in range(max(1, retries)):
         found: list[Any] = []
@@ -308,7 +312,7 @@ def _find_chats_table(ax_app, retries: int = 3) -> Any:
         if found:
             return found[0]
         if attempt < retries - 1:
-            time.sleep(0.25)
+            time.sleep(0.4)
     return None
 
 
